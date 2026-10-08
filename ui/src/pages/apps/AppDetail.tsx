@@ -388,6 +388,17 @@ export function AppDetail({ renderActions, onReconnect }: {
       }),
   });
 
+  const revokeGrant = useMutation({
+    mutationFn: (grantId: string) => toolsApi.revokeConnectionGrant(connectionId, grantId),
+    onSuccess: invalidateGrants,
+    onError: (error) =>
+      pushToast({
+        title: "Couldn't revoke the identity",
+        body: error instanceof Error ? error.message : "Please try again.",
+        tone: "error",
+      }),
+  });
+
   // A denied or conflicting audience save keeps the dialog open with the
   // selection intact, so the error is surfaced inline rather than as a toast.
   const [audienceError, setAudienceError] = useState<string | null>(null);
@@ -656,6 +667,8 @@ export function AppDetail({ renderActions, onReconnect }: {
                 refreshAccessPending={refreshGitHubAccess.isPending}
                 onReplaceAudience={(grant, memberUserIds) =>
                   replaceAudience.mutate({ grantId: grant.id, memberUserIds })}
+                memberIdentities={connection.config?.memberPersonalIdentities === true}
+                onRevoke={(grant) => revokeGrant.mutateAsync(grant.id)}
               />
               {isRemoteMcpConnectorMethod(connection.config?.sourceTemplateKey, connection.config?.connectionMethodKey) && <p className="text-sm text-muted-foreground">Paperclip controls access to the tools listed here. App and action permissions inside these tools are managed in {baseAppName}.</p>}
               {connection.authKind === "oauth" && (

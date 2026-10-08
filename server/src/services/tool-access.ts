@@ -586,6 +586,20 @@ function protectedResourceMetadataUrls(endpoint: URL): string[] {
 }
 
 /**
+ * The account email of an OpenID Connect token response, used only as the label of a personal identity. The ID token
+ * came straight from the token endpoint over TLS, so its signature is not checked (OIDC Core 3.1.3.7).
+ */
+function idTokenEmail(idToken: unknown): string | null {
+  if (typeof idToken !== "string") return null;
+  try {
+    const claims = asRecord(JSON.parse(Buffer.from(idToken.split(".")[1] ?? "", "base64url").toString("utf8")));
+    return typeof claims.email === "string" && claims.email_verified !== false ? claims.email.slice(0, 200) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Canonical RFC 8707 resource indicator for an MCP endpoint: origin + path, with
  * query, fragment and any trailing slash removed. Vendor query parameters belong
  * to the connection config, not to the token audience.
@@ -6496,8 +6510,17 @@ export function toolAccessService(
             eq(connectionGrants.status, "active"),
           ),
         )
+        .orderBy(
+          sql`${connectionGrants.subjectUserId} = ${connection.createdByUserId} desc nulls last`,
+          asc(connectionGrants.createdAt),
+        )
         .limit(2);
-      if (personalGrants.length === 1) return personalGrants[0]!;
+      // A connection every member adds their own identity to has several; its background checks use the creator's
+      // identity, else the oldest one.
+      if (
+        personalGrants.length === 1
+        || (personalGrants.length > 1 && connection.config.memberPersonalIdentities === true)
+      ) return personalGrants[0]!;
     }
     if (connection.credentialPolicy === "per_user") {
       throw unprocessable(
@@ -15560,9 +15583,14 @@ export function toolAccessService(
             nextCredentialSecretRefs.push(existingRefreshRef);
         }
 
+        // On a connection every member adds their own identity to, the account email tells the identities apart.
+        const accountEmail = connection.config.memberPersonalIdentities === true
+          ? idTokenEmail(token.raw.id_token)
+          : null;
         const grantValues = {
           providerTenant: {
             ...(existingUserGrant?.providerTenant ?? {}),
+            ...(accountEmail ? { name: accountEmail } : {}),
             oauth: {
               ...asRecord(asRecord(existingUserGrant?.providerTenant).oauth),
               strategy: "direct_oauth",

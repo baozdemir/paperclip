@@ -29,7 +29,7 @@ import {
   aiSubscriptionNeedsIsolatedLogin,
   GOOGLE_WORKSPACE_CONNECTOR_PROFILES,
 } from "@paperclipai/shared";
-import { useNavigate } from "@/lib/router";
+import { Link, useNavigate } from "@/lib/router";
 import { useChatConnectorsEnabled } from "@/hooks/useChatConnectorsEnabled";
 import { useMemoryConnectorsEnabled } from "@/hooks/useMemoryConnectorsEnabled";
 import { appCopyFor } from "@/lib/app-gallery-copy";
@@ -87,6 +87,7 @@ import {
   connectionOwnerProfile,
   type ConnectionOwnerProfile,
 } from "./connection-owner";
+import { personalGrantFor } from "./connection-identity";
 
 type ConnectorRowModel = {
   key: string;
@@ -292,7 +293,7 @@ function accountActionHref(
  * surface. Connected providers sort first and expand in place to show every
  * account; unconnected providers retain the same catalog setup flows.
  */
-export function Browse({ renderAccountDetails = (connection) => connection.connectionPurpose === "ai" ? <ManagedAiConnectionRow connection={connection} /> : null }: { renderAccountDetails?: (connection: ToolConnection) => ReactNode } = {}) {
+export function Browse({ renderAccountDetails = (connection) => connection.connectionPurpose === "ai" ? <ManagedAiConnectionRow connection={connection} /> : connection.config?.memberPersonalIdentities === true ? <YourAccountStatus connection={connection} /> : null }: { renderAccountDetails?: (connection: ToolConnection) => ReactNode } = {}) {
   const navigate = useNavigate();
   const preselectedChatAgentId =
     typeof window === "undefined"
@@ -1047,6 +1048,28 @@ function ConnectionAccountRow({
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
+    </div>
+  );
+}
+
+/** A connection every member adds their own identity to: whether the viewer's own account is connected. */
+function YourAccountStatus({ connection }: { connection: ToolConnection }) {
+  const grantsQuery = useQuery({
+    queryKey: queryKeys.tools.connectionGrants(connection.id),
+    queryFn: () => toolsApi.listConnectionGrants(connection.id),
+  });
+  if (!grantsQuery.data) return null;
+  const mine = personalGrantFor(grantsQuery.data.grants, grantsQuery.data.currentUserId);
+  return (
+    <div className="truncate text-xs text-muted-foreground">
+      Your account:{" "}
+      {mine?.status === "active" ? (
+        mine.providerTenant?.name ?? "connected"
+      ) : (
+        <Link to={`/apps/${connection.id}/permissions`} className="text-foreground hover:underline">
+          connect my account
+        </Link>
+      )}
     </div>
   );
 }

@@ -1470,6 +1470,90 @@ describe("AppDetail", () => {
     expect(navigateTopLevelMock).toHaveBeenCalledWith("https://accounts.example.test/authorize");
   });
 
+  it("shows a member only their own account on a connection every member adds their identity to", async () => {
+    mockParams.tab = "permissions";
+    getConnectionMock.mockResolvedValue(perUserConnection({
+      config: { url: "https://mail.example/mcp", memberPersonalIdentities: true },
+    }));
+    listConnectionGrantsMock.mockResolvedValue({
+      connection: { id: "conn-1", uid: "conn-1" },
+      grants: [],
+      capabilities: fullCapabilities(),
+      currentUserId: "user-1",
+      members: [],
+    });
+    startPersonalAuthorizationMock.mockResolvedValue({ url: "https://accounts.example.test/authorize" });
+
+    await renderAppDetail();
+
+    expect(container.textContent).toContain("Whose account is used?");
+    expect(container.textContent).toContain("Your account");
+    expect(container.textContent).not.toContain("Only you can use this connection");
+    expect(container.textContent).not.toContain("Connected people");
+
+    await act(async () => {
+      findButton("Connect my account")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flushReact();
+
+    expect(startPersonalAuthorizationMock).toHaveBeenCalledWith("company-1", "conn-1", {
+      subjectUserId: "user-1",
+      returnTo: "/apps/conn-1/permissions",
+    });
+  });
+
+  it("lists everyone's account to a manager and lets them remove one", async () => {
+    mockParams.tab = "permissions";
+    getConnectionMock.mockResolvedValue(perUserConnection({
+      createdByUserId: "user-1",
+      config: { url: "https://mail.example/mcp", memberPersonalIdentities: true },
+    }));
+    listConnectionGrantsMock.mockResolvedValue({
+      connection: { id: "conn-1", uid: "conn-1" },
+      grants: [
+        personalGrant({ providerTenant: { name: "me@example.com" } }),
+        personalGrant({
+          id: "grant-carol",
+          subjectUserId: "user-2",
+          createdByUserId: "user-2",
+          providerTenant: { name: "carol@example.com" },
+        }),
+      ],
+      capabilities: fullCapabilities({ canViewOtherPersonalIdentities: true }),
+      currentUserId: "user-1",
+      members: [
+        { userId: "user-1", name: "Me", email: "me@example.com" },
+        { userId: "user-2", name: "Carol", email: "carol@example.com" },
+        { userId: "user-3", name: "Dan", email: "dan@example.com" },
+      ],
+    });
+    revokeConnectionGrantMock.mockResolvedValue(personalGrant({ id: "grant-carol", status: "revoked" }));
+
+    await renderAppDetail();
+
+    expect(container.textContent).toContain("Connected people (2)");
+    expect(container.textContent).toContain("Carol");
+    expect(container.textContent).toContain("carol@example.com");
+    expect(container.textContent).toContain("Not connected yet: 1 member");
+    expect(findButton("Connect my account")).toBeUndefined();
+
+    const removeButtons = Array.from(container.querySelectorAll("button"))
+      .filter((button) => button.textContent?.trim() === "Remove");
+    expect(removeButtons).toHaveLength(2);
+    await act(async () => {
+      removeButtons[1]!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flushReact();
+    await act(async () => {
+      Array.from(document.body.querySelectorAll("button"))
+        .find((button) => button.textContent?.trim() === "Revoke identity")
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flushReact();
+
+    expect(revokeConnectionGrantMock).toHaveBeenCalledWith("conn-1", "grant-carol");
+  });
+
   it("keeps personal managed authorization in the tenant until the provider is ready", async () => {
     const session = "personal_background_session_1234";
     const request = vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({
