@@ -32,7 +32,7 @@ function possessive(label: string): string {
  * name useful in a multi-user company ("Dotta’s Notion", "Sam’s Gmail").
  */
 export function connectionDisplayNameForOwner(
-  connection: Pick<ToolConnection, "name">,
+  connection: Pick<ToolConnection, "name" | "config">,
   applicationName: string,
   owner: ConnectionOwnerProfile | null,
 ): string {
@@ -45,7 +45,8 @@ export function connectionDisplayNameForOwner(
     /^(?:[a-z0-9-]+\.)+[a-z]{2,}$/i.test(rawName)
       ? rawName
       : humanizeConnectionDisplayName(connection);
-  if (!owner) return connectionName;
+  // A connection every member adds their own identity to is nobody's in particular.
+  if (!owner || connection.config?.memberPersonalIdentities === true) return connectionName;
   if (connectionName.trim().toLocaleLowerCase() !== applicationName.trim().toLocaleLowerCase()) {
     return connectionName;
   }

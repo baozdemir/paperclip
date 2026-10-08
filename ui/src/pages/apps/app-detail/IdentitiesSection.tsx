@@ -442,8 +442,7 @@ function MemberIdentitiesSection({
       <div>
         <h2 className="text-sm font-semibold text-foreground">Whose account is used?</h2>
         <p className="mt-1 text-sm text-muted-foreground">
-          Everyone connects their own {appName} account. Agents use the account of the person who asked, never anyone
-          else’s.
+          Everyone connects their own account. Agents use the account of the person who asked, never anyone else’s.
         </p>
       </div>
 
