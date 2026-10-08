@@ -427,6 +427,7 @@ export function createOAuthClientProtocol({ fetchRemoteHttpUrl, assertOAuthEndpo
       scope: typeof record.scope === "string" ? record.scope : null,
       tokenType:
         typeof record.token_type === "string" ? record.token_type : "Bearer",
+      idToken: typeof record.id_token === "string" ? record.id_token : null,
     };
   }
 

@@ -1,7 +1,7 @@
 import type { ActorInfo } from "./types.js";
 import { oauthConfig } from "./oauth/metadata.js";
 import { remoteEndpoint } from "./connection-methods.js";
-import { and, eq } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { connectionGrants, toolConnections } from "@paperclipai/db";
 import { badRequest, HttpError, unprocessable } from "../../errors.js";
@@ -80,8 +80,17 @@ export function createConnectionCredentialAccess(db: Db, { secrets, audit, verce
             eq(connectionGrants.status, "active"),
           ),
         )
+        .orderBy(
+          sql`${connectionGrants.subjectUserId} = ${connection.createdByUserId} desc nulls last`,
+          asc(connectionGrants.createdAt),
+        )
         .limit(2);
-      if (personalGrants.length === 1) return personalGrants[0]!;
+      // A connection every member adds their own identity to has several; its background checks use the creator's
+      // identity, else the oldest one.
+      if (
+        personalGrants.length === 1
+        || (personalGrants.length > 1 && connection.config.memberPersonalIdentities === true)
+      ) return personalGrants[0]!;
     }
     if (connection.credentialPolicy === "per_user") {
       throw unprocessable(

@@ -33,6 +33,20 @@ function asRecord(value: unknown): Record<string, unknown> {
   return {};
 }
 
+/**
+ * The account email of an OpenID Connect token response, used only as the label of a personal identity. The ID token
+ * came straight from the token endpoint over TLS, so its signature is not checked (OIDC Core 3.1.3.7).
+ */
+function idTokenEmail(idToken: unknown): string | null {
+  if (typeof idToken !== "string") return null;
+  try {
+    const claims = asRecord(JSON.parse(Buffer.from(idToken.split(".")[1] ?? "", "base64url").toString("utf8")));
+    return typeof claims.email === "string" && claims.email_verified !== false ? claims.email.slice(0, 200) : null;
+  } catch {
+    return null;
+  }
+}
+
 type Dependencies = {
   now: () => Date;
   getConnectionRow(idOrUid: string, companyId?: string): Promise<typeof toolConnections.$inferSelect>;
@@ -256,9 +270,14 @@ export function createDirectOAuthCallback(db: Db, dependencies: Dependencies) {
           tokenScope: token.scope,
           requestedScopes: authorizedScopes,
         });
+        // On a connection every member adds their own identity to, the account email tells the identities apart.
+        const accountEmail = connection.config.memberPersonalIdentities === true
+          ? idTokenEmail(token.idToken)
+          : null;
         const grantValues = {
           providerTenant: {
             ...(existingUserGrant?.providerTenant ?? {}),
+            ...(accountEmail ? { name: accountEmail } : {}),
             oauth: {
               ...asRecord(asRecord(existingUserGrant?.providerTenant).oauth),
               strategy: "direct_oauth",
