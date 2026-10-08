@@ -17763,6 +17763,33 @@ describeEmbeddedPostgres("tool access service", () => {
     });
   });
 
+  it("rechecks shared connections that need attention after a minute", async () => {
+    const company = await createCompany(db);
+    const service = createTestToolAccessService(db);
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("still down"));
+    const create = (name: string) => service.createConnection(company.id, {
+      name,
+      transport: "mcp_remote",
+      config: { url: "https://fixture.example/mcp" },
+      enabled: true,
+      status: "active",
+    });
+    const failing = await create("Recently failed");
+    const healthy = await create("Recently healthy");
+    const personal = await create("Recently failed personal");
+    const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000);
+    await db.update(toolConnections).set({ healthStatus: "error", healthCheckedAt: twoMinutesAgo })
+      .where(eq(toolConnections.id, failing.id));
+    await db.update(toolConnections).set({ healthStatus: "ok", healthCheckedAt: twoMinutesAgo })
+      .where(eq(toolConnections.id, healthy.id));
+    await db.update(toolConnections).set({ healthStatus: "error", healthCheckedAt: twoMinutesAgo, credentialPolicy: "per_user" })
+      .where(eq(toolConnections.id, personal.id));
+
+    const sweep = await service.sweepConnectionHealth();
+
+    expect(sweep).toMatchObject({ checked: 1, failedConnectionIds: [failing.id] });
+  });
+
   it("enriches listConnections with lastUsedAt from the most recent tool-call event", async () => {
     const company = await createCompany(db);
     const service = createTestToolAccessService(db);

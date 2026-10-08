@@ -167,7 +167,7 @@ import { extendApprovedExecutionWaitDeadline } from "./approved-execution-wait.j
 
 const DEFAULT_SESSION_TTL_MS = 15 * 60 * 1000;
 const MAX_SESSION_TTL_MS = 60 * 60 * 1000;
-const DEFAULT_TOOL_TIMEOUT_MS = 10_000;
+const DEFAULT_TOOL_TIMEOUT_MS = 60_000;
 
 export function resolveCredentialGrantKind(
   policy: "shared" | "per_user" | "per_user_with_fallback" | "per_agent",
@@ -6116,11 +6116,6 @@ export function createToolGatewayService(
       }
       if (payloadRecord.error !== undefined) {
         const errorRecord = asRecord(payloadRecord.error);
-        await markRemoteConnectionHealth(
-          connection,
-          "error",
-          "Remote MCP server returned a JSON-RPC error.",
-        );
         throw new ToolGatewayHttpError(
           502,
           "Remote MCP server returned an error",
@@ -6189,11 +6184,6 @@ export function createToolGatewayService(
         );
       }
       if (error instanceof Error && error.name === "AbortError") {
-        await markRemoteConnectionHealth(
-          connection,
-          "error",
-          "Remote MCP tool call timed out.",
-        );
         throw new ToolGatewayHttpError(
           504,
           "Remote MCP tool call timed out",

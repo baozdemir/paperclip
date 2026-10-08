@@ -4388,6 +4388,136 @@ rl.on("line", (line) => {
     });
   }
 
+  const callScopedFailureCases = [
+    {
+      name: "timeout",
+      reasonCode: "tool_timeout",
+      status: 504,
+      timeoutMs: 10,
+      response: () => ({ delayMs: 75, body: { jsonrpc: "2.0", id: "slow", result: { content: [{ type: "text", text: "late" }] } } }),
+    },
+    {
+      name: "JSON-RPC error",
+      reasonCode: "remote_mcp_error",
+      status: 502,
+      timeoutMs: undefined,
+      response: () => ({ body: { jsonrpc: "2.0", id: "bad", error: { code: -32602, message: "invalid filter" } } }),
+    },
+  ];
+
+  for (const scenario of callScopedFailureCases) {
+    it(`keeps a remote MCP connection healthy and discoverable after a ${scenario.name}`, async () => {
+      const company = await createCompany(db);
+      const agent = await createAgent(db, company.id);
+      const { run } = await createIssueAndRun(db, company.id, agent.id);
+      const fake = await startFakeRemoteMcpServer(() => scenario.response());
+      try {
+        const { connection } = await createRemoteMcpTool(db, company.id, {
+          applicationKey: `call-scoped-${scenario.reasonCode}`,
+          toolName: "kv_set",
+          url: fake.url,
+        });
+        await allowAllToolsForAgent(db, company.id, agent.id);
+        const gateway = createTestToolGatewayService(db);
+        const session = await gateway.createSession({ companyId: company.id, agentId: agent.id, runId: run.id });
+        const connectedTool = (await gateway.listToolsForSession(session.token))
+          .find((tool) => tool.providerType === "mcp_remote_http");
+        expect(connectedTool).toBeTruthy();
+
+        await gateway.executeTool({
+          sessionToken: session.token,
+          tool: connectedTool!.name,
+          parameters: { key: "alpha", value: "one" },
+          timeoutMs: scenario.timeoutMs,
+        }).then(
+          () => {
+            throw new Error("Expected remote MCP call to fail");
+          },
+          (error) => expectGatewayError(error, scenario.status, scenario.reasonCode),
+        );
+
+        const [persisted] = await db
+          .select({ healthStatus: toolConnections.healthStatus })
+          .from(toolConnections)
+          .where(eq(toolConnections.id, connection.id));
+        expect(persisted.healthStatus).toBe("ok");
+        const nextSession = await gateway.createSession({ companyId: company.id, agentId: agent.id, runId: run.id });
+        expect((await gateway.listToolsForSession(nextSession.token)).map((tool) => tool.name))
+          .toContain(connectedTool!.name);
+      } finally {
+        await fake.close();
+      }
+    });
+  }
+
+  it("still marks a remote MCP connection unhealthy after an HTTP error", async () => {
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const { run } = await createIssueAndRun(db, company.id, agent.id);
+    const fake = await startFakeRemoteMcpServer(() => ({ status: 503, body: { error: "unavailable" } }));
+    try {
+      const { connection } = await createRemoteMcpTool(db, company.id, {
+        applicationKey: "http-error-health",
+        toolName: "kv_set",
+        url: fake.url,
+      });
+      await allowAllToolsForAgent(db, company.id, agent.id);
+      const gateway = createTestToolGatewayService(db);
+      const session = await gateway.createSession({ companyId: company.id, agentId: agent.id, runId: run.id });
+      const connectedTool = (await gateway.listToolsForSession(session.token))
+        .find((tool) => tool.providerType === "mcp_remote_http");
+      await gateway.executeTool({
+        sessionToken: session.token,
+        tool: connectedTool!.name,
+        parameters: { key: "alpha", value: "one" },
+      }).then(
+        () => {
+          throw new Error("Expected remote MCP call to fail");
+        },
+        (error) => expectGatewayError(error, 502, "mcp_remote_status"),
+      );
+
+      const [persisted] = await db
+        .select({ healthStatus: toolConnections.healthStatus })
+        .from(toolConnections)
+        .where(eq(toolConnections.id, connection.id));
+      expect(persisted.healthStatus).toBe("error");
+    } finally {
+      await fake.close();
+    }
+  });
+
+  it("gives remote MCP tool calls without an explicit timeout more than ten seconds", async () => {
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const { run } = await createIssueAndRun(db, company.id, agent.id);
+    const fake = await startFakeRemoteMcpServer((request) => ({
+      delayMs: 10_500,
+      body: { jsonrpc: "2.0", id: request.body?.id ?? "slow", result: { content: [{ type: "text", text: "slow but fine" }] } },
+    }));
+    try {
+      await createRemoteMcpTool(db, company.id, {
+        applicationKey: "slow-default-timeout",
+        toolName: "kv_set",
+        url: fake.url,
+      });
+      await allowAllToolsForAgent(db, company.id, agent.id);
+      const gateway = createTestToolGatewayService(db);
+      const session = await gateway.createSession({ companyId: company.id, agentId: agent.id, runId: run.id });
+      const connectedTool = (await gateway.listToolsForSession(session.token))
+        .find((tool) => tool.providerType === "mcp_remote_http");
+
+      const result = await gateway.executeTool({
+        sessionToken: session.token,
+        tool: connectedTool!.name,
+        parameters: { key: "alpha", value: "one" },
+      });
+      expect(JSON.stringify(result.result)).toContain("slow but fine");
+    } finally {
+      await fake.close();
+    }
+  }, 30_000);
+
   it("persists hashed sessions and accepts them across gateway service instances", async () => {
     const company = await createCompany(db);
     const agent = await createAgent(db, company.id);
