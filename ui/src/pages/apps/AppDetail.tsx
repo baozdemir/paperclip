@@ -408,6 +408,17 @@ function StandardAppDetail({ renderActions, renderAgentSettings, renderConnectio
       }),
   });
 
+  const revokeGrant = useMutation({
+    mutationFn: (grantId: string) => toolsApi.revokeConnectionGrant(connectionId, grantId),
+    onSuccess: invalidateGrants,
+    onError: (error) =>
+      pushToast({
+        title: "Couldn't revoke the identity",
+        body: error instanceof Error ? error.message : "Please try again.",
+        tone: "error",
+      }),
+  });
+
   // A denied or conflicting audience save keeps the dialog open with the
   // selection intact, so the error is surfaced inline rather than as a toast.
   const [audienceError, setAudienceError] = useState<string | null>(null);
@@ -680,6 +691,8 @@ function StandardAppDetail({ renderActions, renderAgentSettings, renderConnectio
                 refreshAccessPending={refreshGitHubAccess.isPending}
                 onReplaceAudience={(grant, memberUserIds) =>
                   replaceAudience.mutate({ grantId: grant.id, memberUserIds })}
+                memberIdentities={connection.config?.memberPersonalIdentities === true}
+                onRevoke={(grant) => revokeGrant.mutateAsync(grant.id)}
               />
               {connection.config?.sourceTemplateKey === "composio" ? <p className="text-sm text-muted-foreground">
                 These permissions apply to all apps available through this Composio connection. Manage app accounts and sign-in in Composio.

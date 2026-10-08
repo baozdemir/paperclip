@@ -45,6 +45,7 @@ vi.mock("@/api/publicMcp", () => ({ publicMcpApi: { connections: assistantConnec
 const listGalleryMock = vi.hoisted(() => vi.fn());
 const listApplicationsMock = vi.hoisted(() => vi.fn());
 const listConnectionsMock = vi.hoisted(() => vi.fn());
+const listConnectionGrantsMock = vi.hoisted(() => vi.fn());
 const listUserDirectoryMock = vi.hoisted(() => vi.fn());
 const archiveConnectionMock = vi.hoisted(() => vi.fn());
 const pushToastMock = vi.hoisted(() => vi.fn());
@@ -73,6 +74,7 @@ vi.mock("@/api/tools", () => ({
     listGallery: (companyId: string) => listGalleryMock(companyId),
     listApplications: (companyId: string) => listApplicationsMock(companyId),
     listConnections: (companyId: string) => listConnectionsMock(companyId),
+    listConnectionGrants: (connectionId: string) => listConnectionGrantsMock(connectionId),
     archiveConnection: (
       connectionId: string,
     ) => archiveConnectionMock(connectionId),
@@ -1203,6 +1205,19 @@ describe("Connectors landing page", () => {
       reconnect?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     expect(navigateMock).toHaveBeenCalledWith("/apps/conn-expired/permissions");
+  });
+
+  it("tells the viewer whether their own account is on a connection every member adds their identity to", async () => {
+    listApplicationsMock.mockResolvedValue({ applications: [application()] });
+    listConnectionsMock.mockResolvedValue({
+      connections: [connection({ config: { sourceTemplateKey: "notion", memberPersonalIdentities: true } })],
+    });
+    listConnectionGrantsMock.mockResolvedValue({ grants: [], currentUserId: "user-1", capabilities: {}, members: [] });
+
+    await renderBrowse();
+
+    expect(container.textContent).toContain("Your account: connect my account");
+    expect(container.querySelector('a[href="/apps/conn-notion/permissions"]')?.textContent).toBe("connect my account");
   });
 
   it("removes a connection from the overflow menu only after destructive confirmation", async () => {
