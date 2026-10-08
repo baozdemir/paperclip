@@ -116,6 +116,7 @@ import {
   issues,
   invites,
   joinRequests,
+  projects,
   toolApplications,
   toolConnections,
 } from "@paperclipai/db";
@@ -16028,9 +16029,22 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
           const sessionGeneration = isLinear
             ? (latestConversation?.sessionGeneration ?? 0) + 1
             : 1;
+          // File the task under the project this agent leads, when it leads exactly one.
+          const ledProjects = await taskTx
+            .select({ id: projects.id })
+            .from(projects)
+            .where(
+              and(
+                eq(projects.companyId, endpoint.companyId),
+                eq(projects.leadAgentId, endpoint.assignedAgentId),
+                isNull(projects.archivedAt),
+              ),
+            )
+            .limit(2);
           const issue = await issuesSvc.create(
             endpoint.companyId,
             {
+              ...(ledProjects.length === 1 ? { projectId: ledProjects[0].id } : {}),
               title: safeTitle(
                 githubAutomatic
                   ? `PR #${githubAutomatic.context.pullNumber}: ${githubAutomatic.context.title}`

@@ -84,6 +84,7 @@ import {
   nativeRunFinalizations,
   environmentLeases,
   principalPermissionGrants,
+  projects,
   toolConnections,
 } from "@paperclipai/db";
 import type { ChatProvider } from "@paperclipai/shared";
@@ -23119,6 +23120,55 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
         .where(eq(issueComments.companyId, fixture.companyId)),
     ).toHaveLength(1);
     await service.shutdown();
+  });
+
+  it("files a Slack task under the project its agent leads, only when the agent leads exactly one", async () => {
+    const fixture = await seedCompany();
+    const { callbacks, endpoint, service } = await configuredSlackEndpoint(fixture);
+    const [ledProject] = await db
+      .insert(projects)
+      .values({ companyId: fixture.companyId, name: "Led project", leadAgentId: fixture.assignedAgentId })
+      .returning();
+
+    const taskFor = async (ts: string, expectedConversations: number) => {
+      const { thread } = makeThread({
+        channelId: "C-ENGINEERING",
+        id: `slack:C-ENGINEERING:${ts}`,
+        name: "engineering",
+      });
+      await deliverMessage({
+        callbacks,
+        endpointId: endpoint.id,
+        thread,
+        message: makeMessage({ id: ts, text: "@maya check the deploy", mentioned: true }),
+        trigger: "mention",
+      });
+      await vi.waitFor(
+        async () => {
+          await service.processPendingDeliveries();
+          const conversations = await db
+            .select()
+            .from(chatConversations)
+            .where(eq(chatConversations.endpointId, endpoint.id));
+          expect(conversations).toHaveLength(expectedConversations);
+        },
+        { timeout: 10_000 },
+      );
+      const [conversation] = await db
+        .select()
+        .from(chatConversations)
+        .where(eq(chatConversations.endpointId, endpoint.id))
+        .orderBy(desc(chatConversations.createdAt))
+        .limit(1);
+      const [issue] = await db.select().from(issues).where(eq(issues.id, conversation.issueId));
+      return issue;
+    };
+
+    expect((await taskFor("2000.1", 1)).projectId).toBe(ledProject.id);
+    await db
+      .insert(projects)
+      .values({ companyId: fixture.companyId, name: "Second led project", leadAgentId: fixture.assignedAgentId });
+    expect((await taskFor("2000.2", 2)).projectId).toBeNull();
   });
 
   it("deduplicates inbound events, keeps one task per thread, and enables newly discovered Slack channels", async () => {
