@@ -12,8 +12,11 @@ const MAX_TEXT_INPUT_LENGTH = 1_000_000;
 const MAX_TEXT_OUTPUT_LENGTH = 4_000_000;
 const MAX_ATTACHMENTS = 20;
 const MAX_CARD_ACTIONS = 12;
-const MAX_TITLE_LENGTH = 160;
+// Slack renders the card title as a header block (150 characters).
+const MAX_TITLE_LENGTH = 150;
 const MAX_ACTION_LABEL_LENGTH = 80;
+// Slack renders the card body as one section block (3,000 characters); markup conversion can lengthen it.
+const MAX_CARD_BODY_LENGTH = 2_500;
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -235,6 +238,13 @@ function truncateByCodePoint(input: string, limit: number): string {
   return Array.from(input).slice(0, limit).join("");
 }
 
+function limitCardBody(body: string): string {
+  if (body.length <= MAX_CARD_BODY_LENGTH) return body;
+  let cut = truncateByCodePoint(body, MAX_CARD_BODY_LENGTH);
+  if ((cut.match(/```/g) ?? []).length % 2 === 1) cut += "\n```";
+  return `${cut}\n\n… (truncated; open in Paperclip for the full text)`;
+}
+
 /**
  * The only text projection allowed to cross from Paperclip into a provider.
  * It strips internal reasoning/tool/log content, redacts credentials, removes
@@ -314,7 +324,7 @@ function projectCard(
     MAX_TITLE_LENGTH,
   );
   const body = input.card.body
-    ? projectSafeChatPublicationText(input.card.body)
+    ? limitCardBody(projectSafeChatPublicationText(input.card.body))
     : undefined;
   const rawActions = input.card.actions ?? [];
   if (rawActions.length > MAX_CARD_ACTIONS) {

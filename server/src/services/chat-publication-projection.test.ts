@@ -89,6 +89,42 @@ describe("chat publication projection", () => {
     );
   });
 
+  it("caps a long card body below Slack's section limit and closes an open code fence", () => {
+    const body = [
+      "Risk: `write`",
+      "",
+      "```json",
+      "| TC-A1 | step | expected result |\n".repeat(400),
+      "```",
+    ].join("\n");
+    const card = projectSafeChatPublication({
+      classification: "external",
+      source: "issue_interaction",
+      text: "Approval needed",
+      interaction: {
+        id: "interaction:long-body",
+        card: { kind: "confirmation", title: "Approve Create Issue?", body },
+      },
+    }).card!;
+    expect(card.body!.length).toBeLessThan(2_600);
+    expect((card.body!.match(/```/g) ?? []).length % 2).toBe(0);
+    expect(card.body).toMatch(/open in Paperclip for the full text\)$/);
+  });
+
+  it("keeps a short card body as it is and caps the title at Slack's header limit", () => {
+    const card = projectSafeChatPublication({
+      classification: "external",
+      source: "issue_interaction",
+      text: "Approval needed",
+      interaction: {
+        id: "interaction:long-title",
+        card: { kind: "confirmation", title: "Ç".repeat(200), body: "Risk: `write`" },
+      },
+    }).card!;
+    expect(card.body).toBe("Risk: `write`");
+    expect(Array.from(card.title).length).toBe(150);
+  });
+
   it("projects a classified payload with deduplicated attachments and a closed card schema", () => {
     const attachmentId = "11111111-1111-4111-8111-111111111111";
     const payload = projectSafeChatPublication({
