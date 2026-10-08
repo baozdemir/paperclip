@@ -14413,7 +14413,10 @@ export function toolAccessService(
         "Board users may only reconnect their own personal connection",
       );
     }
-    if (fixedSubjectUserId && subjectUserId !== fixedSubjectUserId) {
+    // A connection with config.memberPersonalIdentities lets every member add their own identity to it: one personal
+    // grant per member, and the subject is still the signed-in user (checked above), never someone else.
+    const membersAddOwnIdentity = connection.config.memberPersonalIdentities === true;
+    if (fixedSubjectUserId && subjectUserId !== fixedSubjectUserId && !membersAddOwnIdentity) {
       throw forbidden(
         "Only the existing personal identity can reconnect this connection",
       );
