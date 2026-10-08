@@ -95,6 +95,8 @@ export function IdentitiesSection({
   audienceGrantId,
   onOpenAudience,
   onCloseAudience,
+  memberIdentities = false,
+  onRevoke,
 }: {
   appName: string;
   credentialPolicy: ToolConnectionCredentialPolicy;
@@ -121,6 +123,9 @@ export function IdentitiesSection({
   audienceGrantId: string | null;
   onOpenAudience: (grantId: string) => void;
   onCloseAudience: () => void;
+  /** `config.memberPersonalIdentities`: every member adds their own identity to this one connection. */
+  memberIdentities?: boolean;
+  onRevoke?: (grant: ConnectionGrant) => Promise<unknown>;
 }) {
   const grants = grantsQuery?.grants ?? [];
   const capabilities = grantsQuery?.capabilities;
@@ -198,6 +203,22 @@ export function IdentitiesSection({
         />
         {github ? <GitHubConnectionSummary grant={agentGrant} onRefreshAccess={onRefreshAccess} refreshPending={refreshAccessPending} /> : null}
       </section>
+    );
+  }
+
+  if (memberIdentities && credentialPolicy === "per_user") {
+    return (
+      <MemberIdentitiesSection
+        appName={appName}
+        grants={grants}
+        members={members}
+        currentUserId={currentUserId}
+        canConnect={capabilities?.canConnectAsCurrentUser ?? false}
+        canViewOthers={capabilities?.canViewOtherPersonalIdentities ?? false}
+        connectPending={connectPending}
+        onConnectAsMe={onConnectAsMe}
+        onRevoke={onRevoke}
+      />
     );
   }
 
@@ -375,6 +396,126 @@ function GitHubConnectionSummary({
         </p> : null}
       </div>
     </div>
+  );
+}
+
+/**
+ * A connection every member adds their own identity to: each person sees and manages their own account; managers also
+ * get everyone's, because the server lists other people's identities to managers only.
+ */
+function MemberIdentitiesSection({
+  appName,
+  grants,
+  members,
+  currentUserId,
+  canConnect,
+  canViewOthers,
+  connectPending,
+  onConnectAsMe,
+  onRevoke,
+}: {
+  appName: string;
+  grants: ConnectionGrant[];
+  members: ConnectionAudienceMember[];
+  currentUserId: string | null;
+  canConnect: boolean;
+  canViewOthers: boolean;
+  connectPending: boolean;
+  onConnectAsMe: () => void;
+  onRevoke?: (grant: ConnectionGrant) => Promise<unknown>;
+}) {
+  const [revoking, setRevoking] = useState<ConnectionGrant | null>(null);
+  const [revokePending, setRevokePending] = useState(false);
+  const personalGrants = grants.filter((grant) => grant.kind === "user" && grant.status !== "revoked");
+  const myGrant = personalGrantFor(personalGrants, currentUserId);
+  const connectedUserIds = new Set(personalGrants.filter((grant) => grant.status === "active").map((grant) => grant.subjectUserId));
+  const notConnected = members.filter((member) => !connectedUserIds.has(member.userId)).length;
+  const revokeButton = (grant: ConnectionGrant, label: string) =>
+    onRevoke && grant.capabilities?.canRevoke ? (
+      <Button size="sm" variant="outline" onClick={() => setRevoking(grant)}>
+        {label}
+      </Button>
+    ) : null;
+
+  return (
+    <section className="space-y-5">
+      <div>
+        <h2 className="text-sm font-semibold text-foreground">Whose account is used?</h2>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Everyone connects their own {appName} account. Agents use the account of the person who asked, never anyone
+          else’s.
+        </p>
+      </div>
+
+      <IdentityRow
+        id="personal-identity"
+        title="Your account"
+        status={myGrant?.status ?? null}
+        detail={myGrant
+          ? myGrant.providerTenant?.name ?? "Connected"
+          : canConnect
+            ? "Not connected. Connect it so agents can answer you from your own account."
+            : "Your role can’t connect an account."}
+        actions={(
+          <>
+            {canConnect && myGrant?.status !== "active" ? (
+              <Button size="sm" disabled={connectPending} onClick={onConnectAsMe}>
+                {connectPending ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : null}
+                {myGrant ? "Reconnect" : "Connect my account"}
+              </Button>
+            ) : null}
+            {myGrant ? revokeButton(myGrant, "Disconnect") : null}
+          </>
+        )}
+      />
+
+      {canViewOthers ? (
+        <div className="space-y-3">
+          <h3 className="text-sm font-semibold text-foreground">Connected people ({personalGrants.length})</h3>
+          {personalGrants.length > 0 ? (
+            <div className="divide-y divide-border border-y border-border">
+              {personalGrants.map((grant) => (
+                <div key={grant.id} className="py-3">
+                  <IdentityRow
+                    title={memberLabel(members, grant.subjectUserId) ?? "Former member"}
+                    status={grant.status}
+                    detail={grant.providerTenant?.name ?? null}
+                    actions={revokeButton(grant, "Remove")}
+                  />
+                </div>
+              ))}
+            </div>
+          ) : null}
+          {notConnected > 0 ? (
+            <p className="text-xs text-muted-foreground">
+              Not connected yet: {notConnected} {notConnected === 1 ? "member" : "members"}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+
+      {revoking ? (
+        <RevokeGrantDialog
+          grant={revoking}
+          providerName={appName}
+          pending={revokePending}
+          isOwnIdentity={revoking.subjectUserId === currentUserId}
+          credentialPolicy="per_user"
+          onCancel={() => setRevoking(null)}
+          onConfirm={async () => {
+            setRevokePending(true);
+            try {
+              await onRevoke?.(revoking);
+              setRevoking(null);
+            } catch {
+              // The page reports the failure; the dialog stays open for another try.
+            } finally {
+              setRevokePending(false);
+            }
+          }}
+        />
+      ) : null}
+    </section>
   );
 }
 
