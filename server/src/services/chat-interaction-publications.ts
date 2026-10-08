@@ -403,7 +403,10 @@ export async function enqueueIssueInteractionChatPublications(
             interaction.kind === "ask_user_questions"
               ? (question?.helpText ?? undefined)
               : interaction.kind === "request_confirmation"
-                ? (interaction.payload.detailsMarkdown ?? undefined)
+                ? // Tool approvals: the plain-language preview; detailsMarkdown (raw arguments) is board-only.
+                  (interaction.payload.toolAction?.previewMarkdown ??
+                  interaction.payload.detailsMarkdown ??
+                  undefined)
                 : "Open the task in Paperclip to review and respond.",
           actions,
         },
