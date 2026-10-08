@@ -820,6 +820,51 @@ describeEmbeddedPostgres(
       }
     });
 
+    it("shows a tool approval's plain preview on chat cards instead of the board-only arguments", async () => {
+      const fixture = await seedBoundIssue();
+      const service = issueThreadInteractionService(db);
+      const interaction = await service.create(
+        { id: fixture.issueId, companyId: fixture.companyId },
+        {
+          kind: "request_confirmation",
+          continuationPolicy: "wake_assignee",
+          payload: {
+            version: 1,
+            prompt: "Approve Create Issue?",
+            detailsMarkdown: [
+              "Tool: `jira_create_issue`",
+              "",
+              "Arguments reviewed for execution:",
+              "",
+              "```json",
+              "x".repeat(6000),
+              "```",
+            ].join("\n"),
+            toolAction: {
+              version: 1,
+              actionRequestId: randomUUID(),
+              invocationId: randomUUID(),
+              toolName: "jira_create_issue",
+              toolDisplayName: "Create Issue",
+              connectionId: null,
+              applicationId: null,
+              appDisplayName: null,
+              risk: "write",
+              previewMarkdown: "Create Issue · **Summary:** Test cases for PROJ-42",
+              argumentsSummaryJson: "{}",
+              argumentsHash: "arguments-hash",
+              expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+            },
+          },
+        },
+        { agentId: fixture.agentId },
+      );
+      const rows = await markInteractionCardsPublished(fixture.companyId, interaction.id);
+      expect(
+        rows.find((row) => row.endpointId === fixture.endpointIds.slack)?.payload.card?.body,
+      ).toBe("Create Issue · **Summary:** Test cases for PROJ-42");
+    });
+
     it("expires both modal action tokens when a form-backed question is answered", async () => {
       const fixture = await seedBoundIssue(["slack"]);
       const service = issueThreadInteractionService(db);
