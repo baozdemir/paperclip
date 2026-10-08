@@ -6,10 +6,11 @@ import type { ActorInfo } from "../types.js";
 import { nativeProviderCatalogFor } from "../../native-provider-catalogs.js";
 import { retainMcpConnectionFailure } from "../../mcp-connection-failure.js";
 import { isBrowserUseConnection } from "../../browser-use-client.js";
-import { and, asc, eq, isNull, lte, ne, or, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { connectionGrants, toolApplications, toolConnections, toolRuntimeSlots } from "@paperclipai/db";
 import type { ToolConnectionHealthCheckResult, ToolConnectionHealthStatus } from "@paperclipai/shared";
+import { TOOL_CONNECTION_ATTENTION_HEALTH_STATUSES } from "@paperclipai/shared";
 import { HttpError, unprocessable } from "../../../errors.js";
 
 import type { ToolAccessAudit } from "../audit.js";
@@ -219,6 +220,7 @@ export function createConnectionHealth(db: Db, { now, audit, getConnectionRow, d
     const staleAfterMs = input.staleAfterMs ?? 15 * 60 * 1000;
     const limit = input.limit ?? 25;
     const cutoff = new Date(generatedAt.getTime() - staleAfterMs);
+    const attentionCutoff = new Date(generatedAt.getTime() - 60 * 1000);
     // Legacy plugin backfills use a remote transport as a placeholder, but
     // their tools run in the plugin worker and have no remote MCP endpoint.
     // Select only due IDs in SQL so each scheduler tick does not decode every
@@ -237,7 +239,15 @@ export function createConnectionHealth(db: Db, { now, audit, getConnectionRow, d
           ne(toolConnections.transport, "chat_sdk"),
           ne(toolConnections.transport, "runtime_auth"),
           ne(toolApplications.type, "paperclip_plugin"),
-          or(isNull(toolConnections.healthCheckedAt), lte(toolConnections.healthCheckedAt, cutoff)),
+          or(
+            isNull(toolConnections.healthCheckedAt),
+            lte(toolConnections.healthCheckedAt, cutoff),
+            and(
+              inArray(toolConnections.healthStatus, [...TOOL_CONNECTION_ATTENTION_HEALTH_STATUSES]),
+              ne(toolConnections.credentialPolicy, "per_user"),
+              lte(toolConnections.healthCheckedAt, attentionCutoff),
+            ),
+          ),
         ),
       )
       .orderBy(

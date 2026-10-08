@@ -193,7 +193,7 @@ import { extendApprovedExecutionWaitDeadline } from "./approved-execution-wait.j
 
 const DEFAULT_SESSION_TTL_MS = 15 * 60 * 1000;
 const MAX_SESSION_TTL_MS = 60 * 60 * 1000;
-const DEFAULT_TOOL_TIMEOUT_MS = 10_000;
+const DEFAULT_TOOL_TIMEOUT_MS = 60_000;
 
 export function resolveCredentialGrantKind(
   policy: "shared" | "per_user" | "per_user_with_fallback" | "per_agent",
