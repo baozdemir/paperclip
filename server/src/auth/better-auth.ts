@@ -1,14 +1,18 @@
 import type { Request, RequestHandler } from "express";
 import type { IncomingHttpHeaders } from "node:http";
+import { createHash } from "node:crypto";
 import { betterAuth, type Auth } from "better-auth";
+import { APIError, createAuthMiddleware } from "better-auth/api";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { toNodeHandler } from "better-auth/node";
 import type { Db } from "@paperclipai/db";
+import { and, eq, gt, isNull, ne } from "drizzle-orm";
 import {
   authAccounts,
   authSessions,
   authUsers,
   authVerifications,
+  invites,
 } from "@paperclipai/db";
 import type { Config } from "../config.js";
 import { resolvePaperclipInstanceId } from "../home-paths.js";
@@ -273,7 +277,31 @@ export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins:
     emailAndPassword: {
       enabled: true,
       requireEmailVerification: false,
-      disableSignUp: config.authDisableSignUp,
+      disableSignUp: config.authDisableSignUp && process.env.PAPERCLIP_AUTH_INVITE_ONLY_SIGN_UP !== "true",
+    },
+    hooks: {
+      before: createAuthMiddleware(async (ctx) => {
+        if (ctx.path !== "/sign-up/email" || process.env.PAPERCLIP_AUTH_INVITE_ONLY_SIGN_UP !== "true") return;
+        let referer = ctx.headers?.get("referer") ?? "";
+        try { referer = decodeURIComponent(referer); } catch { /* keep the raw value */ }
+        const token = /\/invite\/(pcp_invite_[A-Za-z0-9_-]+)/.exec(referer)?.[1];
+        const [invite] = token
+          ? await db
+            .select({ id: invites.id })
+            .from(invites)
+            .where(and(
+              eq(invites.tokenHash, createHash("sha256").update(token).digest("hex")),
+              isNull(invites.revokedAt),
+              isNull(invites.acceptedAt),
+              gt(invites.expiresAt, new Date()),
+              ne(invites.allowedJoinTypes, "agent"),
+            ))
+            .limit(1)
+          : [];
+        if (!invite) {
+          throw new APIError("FORBIDDEN", { message: "Sign-up is only possible from an invite link." });
+        }
+      }),
     },
     rateLimit: buildBetterAuthRateLimitOptions({
       deploymentMode: config.deploymentMode,
