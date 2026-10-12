@@ -131,6 +131,18 @@ describe("provider-owned interaction arbitration", () => {
     expect(await hasChatRunOwnedProviderInteraction(db, binding)).toBe(false);
   });
 
+  it("leaves the response slot to the run when its interaction is a connection authorization", async () => {
+    const binding = await seed();
+    await db
+      .update(issueThreadInteractions)
+      .set({
+        createdByAgentId: binding.agentId,
+        idempotencyKey: `connection-authorization:${randomUUID()}:user-1`,
+      })
+      .where(eq(issueThreadInteractions.id, binding.interactionId));
+    expect(await hasChatRunOwnedProviderInteraction(db, binding)).toBe(false);
+  });
+
   it("keeps a resolved source run internal when its actual provider prompt exists", async () => {
     const binding = await seed();
     const applicationId = randomUUID();
