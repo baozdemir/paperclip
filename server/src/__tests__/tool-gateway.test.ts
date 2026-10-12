@@ -4614,7 +4614,7 @@ rl.on("line", (line) => {
       reasonCode: "remote_mcp_error",
       status: 502,
       timeoutMs: undefined,
-      response: () => ({ body: { jsonrpc: "2.0", id: "bad", error: { code: -32602, message: "invalid filter" } } }),
+      response: (request: FakeMcpRequest) => ({ body: { jsonrpc: "2.0", id: request.body?.id ?? null, error: { code: -32602, message: "invalid filter" } } }),
     },
   ];
 
@@ -4623,7 +4623,7 @@ rl.on("line", (line) => {
       const company = await createCompany(db);
       const agent = await createAgent(db, company.id);
       const { run } = await createIssueAndRun(db, company.id, agent.id);
-      const fake = await startFakeRemoteMcpServer(() => scenario.response());
+      const fake = await startFakeRemoteMcpServer((request) => scenario.response(request));
       try {
         const { connection } = await createRemoteMcpTool(db, company.id, {
           applicationKey: `call-scoped-${scenario.reasonCode}`,
