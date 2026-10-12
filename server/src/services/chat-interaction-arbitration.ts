@@ -51,6 +51,9 @@ export async function hasChatRunOwnedProviderInteraction(
           "ask_user_questions",
           "request_confirmation",
         ]),
+        // A connection authorization is written straight to the thread and stays in Paperclip (its sign-in needs the
+        // browser), so it never reaches the provider and must not take the run's response slot.
+        sql`coalesce(${issueThreadInteractions.idempotencyKey}, '') not like 'connection-authorization:%'`,
         or(
           and(
             eq(issueThreadInteractions.status, "pending"),
