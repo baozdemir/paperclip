@@ -566,7 +566,7 @@ function Settings({
           {endpoint.provider === "slack" && (
             <SettingToggle
               label="Require at-mention"
-              detail="Only respond to messages that @mention this bot, including thread replies and direct messages. Direct messages must also be allowed above."
+              detail="In channels, only respond to messages that @mention this bot, including thread replies. Direct messages never require an @mention and must be allowed above."
               checked={endpoint.requireAtMention ?? false}
               pending={updateEndpoint.isPending}
               onChange={(requireAtMention) =>

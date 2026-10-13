@@ -32,6 +32,12 @@ Automated: [channel integration](../server/src/__tests__/chat-channels.integrati
 
 Manual: For each supported provider being changed, send a unique message, verify the intended agent/company receives it, and inspect the actual external reply in the original thread. Repeat with an unlinked/unauthorized sender, duplicate inbound delivery, and one supported attachment. Record provider-specific results separately.
 
+For Slack, enable **Require at-mention** and **Allow direct messages**. Send a
+plain DM and follow up without a mention: both should reach the agent, with
+top-level replies to top-level DMs. Channel messages and thread replies still
+require a mention when that setting is enabled. Disable direct messages and
+confirm a plain DM is rejected. Use a private channel for threaded conversations.
+
 ### `endpoint-management`
 
 Automated: [channel integration](../server/src/__tests__/chat-channels.integration.test.ts) covers shared endpoint/delivery behavior; live credential repair and provider ownership remain manual checks.

@@ -7586,7 +7586,7 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
     await service.shutdown();
   });
 
-  it.each([false, true])("requires at-mentions by default for new Slack connections (DM=%s)", async (isDM) => {
+  it.each([false, true])("requires at-mentions by default only in Slack channels (DM=%s)", async (isDM) => {
     const fixture = await seedCompany();
     const { callbacks, endpoint, service, wakeup } = await configuredSlackEndpoint(fixture, { requireAtMention: true });
     // The returned endpoint is the original creation result, before fixture updates.
@@ -7596,12 +7596,12 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
     const send = (id: string, mentioned: boolean) => deliverMessage({ callbacks, endpointId: endpoint.id, thread: thread.thread,
       message: makeMessage({ id, text: mentioned ? "@maya start" : "Start", mentioned }), trigger: isDM ? "direct_message" : mentioned ? "mention" : "subscribed_message" });
     await send("7500.1", false);
-    expect(wakeup).not.toHaveBeenCalled();
+    expect(wakeup).toHaveBeenCalledTimes(isDM ? 1 : 0);
     await send("7500.2", true);
-    expect(wakeup).toHaveBeenCalledTimes(1);
+    expect(wakeup).toHaveBeenCalledTimes(isDM ? 2 : 1);
     await service.update(endpoint.id, { requireAtMention: false });
     await send("7500.3", false);
-    expect(wakeup).toHaveBeenCalledTimes(2);
+    expect(wakeup).toHaveBeenCalledTimes(isDM ? 3 : 2);
     const other = await service.create(fixture.companyId, { provider: "github", assignedAgentId: fixture.assignedAgentId });
     expect(other.requireAtMention).toBe(false);
     expect((await service.get(endpoint.id)).requireAtMention).toBe(false);
@@ -7726,11 +7726,11 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
     await expect(resolveSlackTaskAuthority(db, binding)).resolves.toMatchObject({ slackUserId: "UBOARD" });
   });
 
-  it.each([false, true])("requires Slack at-mentions for every message when enabled (DM=%s)", async (isDM) => {
+  it.each([false, true])("applies Slack mention settings to channel replies while exempting DMs (DM=%s)", async (isDM) => {
     const fixture = await seedCompany();
     const { callbacks, endpoint, service, wakeup } = await configuredSlackEndpoint(fixture);
     expect((await service.get(endpoint.id)).requireAtMention).toBe(false);
-    const thread = makeThread({ channelId: isDM ? "D-MENTION" : "C-MENTION", id: `slack:${isDM ? "D-MENTION" : "C-MENTION"}:7100.1`, isDM });
+    const thread = makeThread({ channelId: isDM ? "D-MENTION" : "C-MENTION", id: isDM ? "slack:D-MENTION:" : "slack:C-MENTION:7100.1", isDM });
     const send = (id: string, mentioned: boolean, trigger: ChatSdkMessageTrigger = isDM ? "direct_message" : "subscribed_message") =>
       deliverMessage({ callbacks, endpointId: endpoint.id, thread: thread.thread,
         message: makeMessage({ id, text: mentioned ? "@maya continue" : "Continue", mentioned }), trigger });
@@ -7739,47 +7739,53 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
     await send("7100.2", false);
     expect(wakeup).toHaveBeenCalledTimes(2);
     expect((await service.update(endpoint.id, { requireAtMention: true })).requireAtMention).toBe(true);
-    await send("7100.3", false);
-    expect(wakeup).toHaveBeenCalledTimes(2);
+    await send("7100.3", false, "subscribed_message");
+    expect(wakeup).toHaveBeenCalledTimes(isDM ? 3 : 2);
     const [filtered] = await db.select().from(chatDeliveries).where(and(
       eq(chatDeliveries.endpointId, endpoint.id), eq(chatDeliveries.state, "filtered")));
-    expect(filtered.redactedError).toBe("Message did not @mention the bot");
-    expect(filtered.normalizedEvent).toMatchObject({ filtering: { contentRetained: false } });
-    expect(filtered.normalizedEvent).not.toHaveProperty("message.text");
+    if (isDM) {
+      expect(filtered).toBeUndefined();
+    } else {
+      expect(filtered.redactedError).toBe("Message did not @mention the bot");
+      expect(filtered.normalizedEvent).toMatchObject({ filtering: { contentRetained: false } });
+      expect(filtered.normalizedEvent).not.toHaveProperty("message.text");
+    }
     // Both Slack callback kinds can carry an explicit mention. Retries cannot
     // produce a second wakeup for the same provider message.
     await send("7100.4", true);
     await send("7100.4", true, "mention");
-    expect(wakeup).toHaveBeenCalledTimes(3);
+    expect(wakeup).toHaveBeenCalledTimes(isDM ? 4 : 3);
     const conversations = await db.select().from(chatConversations).where(eq(chatConversations.endpointId, endpoint.id));
     expect(conversations).toHaveLength(1);
     const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, conversations[0].issueId));
-    expect(comments).toHaveLength(3);
+    expect(comments).toHaveLength(isDM ? 4 : 3);
+    expect(conversations[0].externalThreadId).toBe(thread.thread.id);
     await service.update(endpoint.id, { requireAtMention: false });
     await send("7100.5", false);
-    expect(wakeup).toHaveBeenCalledTimes(4);
+    expect(wakeup).toHaveBeenCalledTimes(isDM ? 5 : 4);
     if (isDM) {
       await service.update(endpoint.id, { requireAtMention: true, allowDirectMessages: false });
-      await send("7100.6", true);
-      expect(wakeup).toHaveBeenCalledTimes(4);
+      await send("7100.6", false);
+      expect(wakeup).toHaveBeenCalledTimes(5);
     }
   });
 
-  it("filters a queued Slack message when Require at-mention is enabled before drain", async () => {
+  it.each([false, true])("rechecks queued Slack channel mentions but exempts DMs before drain (DM=%s)", async (isDM) => {
     const fixture = await seedCompany();
     const { callbacks, endpoint, service, wakeup } = await configuredSlackEndpoint(fixture, {
       deferWebhookProcessing: true, scheduleDeferredWork: () => undefined,
     });
-    const thread = makeThread({ channelId: "D-QUEUED-MENTION", id: "slack:D-QUEUED-MENTION:7300.1", isDM: true });
+    const channelId = isDM ? "D-QUEUED-MENTION" : "C-QUEUED-MENTION";
+    const thread = makeThread({ channelId, id: `slack:${channelId}:${isDM ? "" : "7300.1"}`, isDM });
     await deliverMessage({ callbacks, endpointId: endpoint.id, thread: thread.thread,
-      message: makeMessage({ id: "7300.1", text: "Start work" }), trigger: "direct_message" });
+      message: makeMessage({ id: "7300.1", text: "Start work" }), trigger: isDM ? "direct_message" : "subscribed_message" });
     await service.update(endpoint.id, { requireAtMention: true });
     const [delivery] = await db.select().from(chatDeliveries).where(eq(chatDeliveries.endpointId, endpoint.id));
     await db.update(chatDeliveries).set({ nextAttemptAt: new Date(0) }).where(eq(chatDeliveries.id, delivery.id));
     await service.processPendingDeliveries(25, delivery.id);
-    expect(wakeup).not.toHaveBeenCalled();
-    expect(await db.select().from(chatConversations).where(eq(chatConversations.endpointId, endpoint.id))).toHaveLength(0);
-    expect((await db.select().from(chatDeliveries).where(eq(chatDeliveries.id, delivery.id)))[0].state).toBe("filtered");
+    expect(wakeup).toHaveBeenCalledTimes(isDM ? 1 : 0);
+    expect(await db.select().from(chatConversations).where(eq(chatConversations.endpointId, endpoint.id))).toHaveLength(isDM ? 1 : 0);
+    expect((await db.select().from(chatDeliveries).where(eq(chatDeliveries.id, delivery.id)))[0].state).toBe(isDM ? "processed" : "filtered");
   });
 
   it("captures initial Slack communication guidance once per task, ignoring forged message configuration", async () => {
