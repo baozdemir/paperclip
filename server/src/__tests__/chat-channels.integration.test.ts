@@ -43094,7 +43094,8 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
     expect(stillPending.status).toBe("pending");
   });
 
-  it.each(["owner", "admin"])("executes native Slack production confirmation once for %s and recovers settlement", async role => {
+  it.each([{ role: "owner", previewMode: "server" }, { role: "admin", previewMode: "server" },
+    { role: "owner", previewMode: "arguments" }, { role: "admin", previewMode: "arguments" }])("executes native Slack production confirmation once for $role ($previewMode) and recovers settlement", async ({ role, previewMode }) => {
     const fixture = await seedCompany();
     let execution: Awaited<ReturnType<typeof executionReviewFixture>>;
     let crash = true;
@@ -43124,7 +43125,11 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
     await initializeRunIdentity(db, { companyId: fixture.companyId, runId, issueId: conversation.issueId, responsibleUserId: "owner-user", cause: "instruction" });
     execution = await executionReviewFixture(db, { companyId: fixture.companyId, agentId: fixture.assignedAgentId, issueId: conversation.issueId, runId });
     if (role === "admin") execution.parameters.command = "printf '<analysis>visible</analysis> ```'\n# " + "long-reviewed-command ".repeat(300);
-    await expect(execution.gateway.executeTool({ sessionToken: execution.session.token, tool: execution.prod.name, parameters: execution.parameters })).rejects.toMatchObject({ reasonCode: "approval_required" });
+    if (previewMode === "arguments") await db.update(toolConnections).set({ config: { ...execution.connection.config,
+      executionReview: { ...execution.connection.config.executionReview as object, previewMode } } }).where(eq(toolConnections.id, execution.connection.id));
+    const reviewedParameters = previewMode === "arguments" ? { action: "run", target: { ref_name: "master" },
+      script: "printf '<analysis>visible</analysis> ```'\n# " + "reviewed-provider-command ".repeat(role === "admin" ? 300 : 1) } : execution.parameters;
+    await expect(execution.gateway.executeTool({ sessionToken: execution.session.token, tool: execution.prod.name, parameters: reviewedParameters })).rejects.toMatchObject({ reasonCode: "approval_required" });
     await service.processPendingPublications();
     const [request] = await db.select().from(toolActionRequests).where(eq(toolActionRequests.companyId, fixture.companyId));
     const interaction = (await issueThreadInteractionService(db).listForIssue(conversation.issueId)).find(row => row.payload.toolAction?.actionRequestId === request.id);
@@ -43133,7 +43138,7 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
     expect(publication, JSON.stringify(publication)).toMatchObject({ state: "published", payload: { card: { actions: [
       expect.objectContaining({ type: "callback" }), expect.objectContaining({ type: "callback" }),
     ] } } });
-    expect(JSON.parse(publication.payload.card!.bodySections!.map(section => section.slice(8, -4)).join(""))).toEqual(execution.parameters);
+    expect(JSON.parse(publication.payload.card!.bodySections!.map(section => section.slice(8, -4)).join(""))).toEqual(reviewedParameters);
     const [accept] = await db.select().from(chatActions).where(and(eq(chatActions.endpointId, endpoint.id), eq(chatActions.kind, "confirmation_response"), eq(sql<string>`${chatActions.payload}->>'decision'`, "accept")));
     const event = { endpointId: endpoint.id, provider: "slack" as const, event: {
       actionId: accept.providerActionId, adapter: {} as never, messageId: publication.providerMessageId!,
@@ -43150,7 +43155,7 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
     expect(execution.sends).toHaveLength(0);
     await expect(callbacks.onAction(event)).rejects.toThrow("injected Slack settlement crash");
     expect(execution.sends).toHaveLength(1);
-    expect(execution.sends[0].args).toEqual(execution.parameters);
+    expect(execution.sends[0].args).toEqual(reviewedParameters);
     expect(execution.sends[0].receipt).toMatchObject({ approved: true, actionRequestId: request.id });
     await service.processPendingPublications();
     await callbacks.onAction(event);

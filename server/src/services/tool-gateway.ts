@@ -1,6 +1,6 @@
 import { notifyDeliveryWork, DELIVERY_QUEUES } from "./delivery-work-notifications.js";
 import { composeConnectionInstructions } from "./connection-instructions.js";
-import { executionReviewPreview } from "./execution-review.js";
+import { executionReviewPreview, requiresIndividualExecutionReview } from "./execution-review.js";
 import { assertExecutionReviewer, connectionExecutionReview, executionReview, executionReceipt } from "./execution-review.js";
 import { isInsufficientConnectionScope, INSUFFICIENT_CONNECTION_SCOPE_MESSAGE } from "./connection-permission-errors.js";
 import { boundedMcpToolName } from "./mcp-tool-names.js";
@@ -2401,7 +2401,7 @@ export function createToolGatewayService(
     }
     const actionRequest = input.actionRequest;
     const mandatoryReview = await connectionExecutionReview(db, input.session.companyId, input.tool.connectionId ?? null);
-    const individualReview = mandatoryReview?.tools.includes(input.tool.upstreamToolName ?? input.tool.name) === true;
+    const individualReview = requiresIndividualExecutionReview(mandatoryReview, input.tool.upstreamToolName ?? input.tool.name, input.parameters);
     const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
 
     let signedArguments: ReturnType<typeof signToolArguments>;
@@ -2468,7 +2468,7 @@ export function createToolGatewayService(
     // Prosumer-facing card preview (M5/M7/M9). Respect an already-set custom preview
     // (e.g. OpenClaw-supplied), otherwise emit plain language with no technical vocab.
     const executionArgs = individualReview ? asRecord(input.parameters) : null;
-    const exactPreview = executionArgs ? executionReviewPreview(executionArgs) : null;
+    const exactPreview = executionArgs ? executionReviewPreview(executionArgs, mandatoryReview?.previewMode) : null;
     const previewMarkdown = exactPreview ?? (actionRequest.previewMarkdown?.trim() ||
       buildHumanizedActionPreview({ tool: input.tool, argumentsSummary: input.argumentsSummary }));
 

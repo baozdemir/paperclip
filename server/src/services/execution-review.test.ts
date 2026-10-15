@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createHash, createHmac } from "node:crypto";
-import { executionReceipt, executionReview, executionReviewPreview, executionReviewSections } from "./execution-review.js";
+import { executionReceipt, executionReview, executionReviewPreview, executionReviewSections, requiresIndividualExecutionReview } from "./execution-review.js";
 
 describe("execution review configuration and receipts", () => {
   const settings = { tools: ["run"], approverRoles: ["owner", "admin"], nativeSlack: true, receiptTools: ["run", "run_nonprod"] };
@@ -44,6 +44,29 @@ describe("execution review configuration and receipts", () => {
     expect(executionReviewPreview(args)).toBeNull();
     expect(executionReviewPreview({ ...args, command: "x".repeat(100001) })).toBeNull();
     expect(executionReviewPreview({ server: "s" })).toBeNull();
+  });
+
+  it("keeps explicit mixed-tool reads free and requires review for writes or unknown actions", () => {
+    const review = executionReview({ executionReview: { ...settings, tools: ["bitbucketPipeline"], receiptTools: [],
+      readActions: { bitbucketPipeline: ["list", "get", "step.log"] }, previewMode: "arguments" } })!;
+    for (const action of ["list", "get", "step.log"]) expect(requiresIndividualExecutionReview(review, "bitbucketPipeline", { action })).toBe(false);
+    for (const parameters of [{ action: "run" }, { action: "new-write-action" }, {}, { action: ["list", "run"] }, { action: "LIST" }]) {
+      expect(requiresIndividualExecutionReview(review, "bitbucketPipeline", parameters)).toBe(true);
+    }
+    expect(requiresIndividualExecutionReview(review, "anotherTool", { action: "run" })).toBe(false);
+  });
+  it("supports the complete cloud mutation catalog and rejects invalid read exceptions", () => {
+    expect(executionReview({ executionReview: { ...settings, tools: Array.from({ length: 40 }, (_, i) => `cloud_${i}`) } })).toBeTruthy();
+    for (const readActions of [{ unknown: ["list"] }, { run: [] }, { run: ["list"] }, { run: "list" }]) {
+      expect(() => executionReview({ executionReview: { ...settings, readActions } })).toThrow();
+    }
+  });
+  it("reviews provider arguments completely without requiring SSH-specific fields", () => {
+    const args = { droplet_id: 123, action: "power_cycle", note: "<visible> <!channel> `literal`" };
+    const preview = executionReviewPreview(args, "arguments")!;
+    expect(JSON.parse(preview)).toEqual(args);
+    expect(preview).not.toContain("<!channel>");
+    expect(executionReviewPreview({ password: "private-canary" }, "arguments")).toBeNull();
   });
 
 });
