@@ -108,6 +108,7 @@ export interface ChatPublicationProjectionInput {
       kind: SafeExternalChatCardKind;
       title: string;
       body?: string | null;
+      bodySections?: readonly string[] | null;
       actions?: readonly SafeExternalChatCardAction[] | null;
     };
   } | null;
@@ -326,6 +327,11 @@ function projectCard(
   const body = input.card.body
     ? limitCardBody(projectSafeChatPublicationText(input.card.body))
     : undefined;
+  const bodySections = input.card.bodySections ?? [];
+  if (bodySections.length > 45 || bodySections.some(section => typeof section !== "string" ||
+    section.length > 2500 || projectSafeChatPublicationText(section) !== section)) {
+    throw new UnsafeChatPublicationError("Complete review sections must be bounded and safe without truncation");
+  }
   const rawActions = input.card.actions ?? [];
   if (rawActions.length > MAX_CARD_ACTIONS) {
     throw new UnsafeChatPublicationError(
@@ -377,6 +383,7 @@ function projectCard(
       kind: input.card.kind,
       title,
       ...(body ? { body } : {}),
+      ...(bodySections.length ? { bodySections: [...bodySections] } : {}),
       ...(actions.length ? { actions } : {}),
     },
   };

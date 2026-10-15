@@ -104,7 +104,7 @@ import type {
 } from "chat";
 
 import type { EndpointRecord } from "../runtime-types.js";
-import { createTelegramConfirmationActions } from "../telegram/confirmation-actions.js";
+import { createTelegramConfirmationActions, type ResolveToolAction } from "../telegram/confirmation-actions.js";
 type ResourceRow = typeof chatEndpointResources.$inferSelect;
 type PrincipalResolution = { principal: typeof chatExternalPrincipals.$inferSelect; userId: string | null; linkedDenied: boolean };
 type InteractionCallbacksOptions = {
@@ -130,6 +130,7 @@ type InteractionCallbacksOptions = {
   scheduleMessageProcessing: (task: () => Promise<void>) => void;
   processPendingPublications: () => Promise<unknown>;
   confirmationResolutionPersistBarrier?: () => Promise<void>;
+  resolveToolAction?: ResolveToolAction;
   questionFormOpenAuthorizationBarrier?: () => Promise<void>;
   questionResolutionPersistBarrier?: () => Promise<void>;
 };
@@ -140,6 +141,7 @@ export function createChatInteractionCallbacks(db: Db, options: InteractionCallb
   const { reconcileTerminalConfirmationActions, handleTelegramConfirmation } = createTelegramConfirmationActions(db, {
     requireCurrentExternalActionAuthorization, isExternalActionAuthorizationChange, scheduleMessageProcessing, processPendingPublications,
     get confirmationResolutionPersistBarrier() { return options.confirmationResolutionPersistBarrier; },
+    get resolveToolAction() { return options.resolveToolAction; },
   });
 
 

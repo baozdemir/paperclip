@@ -8,6 +8,8 @@ import { measureToolDiscovery, measureRunPhase } from "./execution-preparation-t
 import { nativeProviderCatalogFor } from "./native-provider-catalogs.js";
 import { composeConnectionInstructions } from "./connection-instructions.js";
 import { googleWorkspaceToolTarget, googleWorkspaceGrantedScopes, isGoogleWorkspaceToolGranted } from "@paperclipai/shared";
+import { executionReviewPreview } from "./execution-review.js";
+import { assertExecutionReviewer, connectionExecutionReview, executionReview, executionReceipt } from "./execution-review.js";
 import { isInsufficientConnectionScope, INSUFFICIENT_CONNECTION_SCOPE_MESSAGE } from "./connection-permission-errors.js";
 import { boundedMcpToolName } from "./mcp-tool-names.js";
 import { browserUseService } from "./browser-use.js";
@@ -2479,6 +2481,8 @@ export function createToolGatewayService(
       );
     }
     const actionRequest = input.actionRequest;
+    const mandatoryReview = await connectionExecutionReview(db, input.session.companyId, input.tool.connectionId ?? null);
+    const individualReview = mandatoryReview?.tools.includes(input.tool.upstreamToolName ?? input.tool.name) === true;
     const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
 
     let signedArguments: ReturnType<typeof signToolArguments>;
@@ -2544,15 +2548,15 @@ export function createToolGatewayService(
 
     // Prosumer-facing card preview (M5/M7/M9). Respect an already-set custom preview
     // (e.g. OpenClaw-supplied), otherwise emit plain language with no technical vocab.
-    const previewMarkdown =
-      actionRequest.previewMarkdown?.trim() ||
-      buildHumanizedActionPreview({
-        tool: input.tool,
-        argumentsSummary: input.argumentsSummary,
-      });
+    const executionArgs = individualReview ? asRecord(input.parameters) : null;
+    const exactPreview = executionArgs ? executionReviewPreview(executionArgs) : null;
+    const previewMarkdown = exactPreview ?? (actionRequest.previewMarkdown?.trim() ||
+      buildHumanizedActionPreview({ tool: input.tool, argumentsSummary: input.argumentsSummary }));
 
     let formalApprovalId: string | null = null;
-    if (toolRequiresFormalApproval(input.tool)) {
+    // Opt-in execution review already enforces a fresh, current human role decision.
+    // Its native Slack decision is the approval; it must not open a second board-only gate.
+    if (toolRequiresFormalApproval(input.tool) && !individualReview) {
       const [approval] = await db
         .insert(approvals)
         .values({
@@ -2629,13 +2633,14 @@ export function createToolGatewayService(
                 : input.tool.risk === "destructive"
                   ? "destructive"
                   : "write",
-            ...(!formalApprovalId &&
+            ...(!individualReview && !formalApprovalId &&
             input.session.agentId &&
             input.tool.connectionId
               ? {
                   rememberActionScope: `This agent may use this action with different arguments on this connection${input.session.projectId ? " within this project" : ""}.`,
                 }
               : {}),
+            ...(individualReview && mandatoryReview?.nativeSlack && exactPreview ? { nativeSlackApproval: true } : {}),
             previewMarkdown,
             argumentsSummaryJson: input.argumentsSummary.summary,
             argumentsHash: canonicalArgumentsHash,
@@ -6113,6 +6118,25 @@ export function createToolGatewayService(
       callerHeaders,
     });
     let headers = builtHeaders.headers;
+    const reviewSettings = executionReview(connection.config);
+    if (reviewSettings?.receiptTools.includes(entry.toolName)) {
+      if (!session.agentId || !session.issueId) throw new ToolGatewayHttpError(403, "A task-scoped agent call is required", "execution_receipt_context_missing");
+      const [reviewed] = await db.select({ id: toolActionRequests.id, status: toolActionRequests.status,
+        userId: toolActionRequests.decidedByUserId }).from(toolActionRequests).where(and(
+          eq(toolActionRequests.companyId, session.companyId), eq(toolActionRequests.invocationId, invocationId),
+          eq(toolActionRequests.status, "executing"))).limit(1);
+      const approvalRequired = reviewSettings.tools.includes(entry.toolName);
+      if (approvalRequired && !reviewed) throw new ToolGatewayHttpError(403, "A consumed human approval is required", "execution_receipt_approval_missing");
+      if (approvalRequired) await assertExecutionReviewer(db, { companyId: session.companyId, connectionId: connection.id,
+        upstreamToolName: entry.toolName, userId: reviewed?.userId });
+      const authorization = Object.entries(headers).find(([key]) => key.toLowerCase() === "authorization")?.[1];
+      const bearer = typeof authorization === "string" && authorization.startsWith("Bearer ") ? authorization.slice(7) : "";
+      const receipt = executionReceipt({ invocationId, companyId: session.companyId, agentId: session.agentId,
+        issueId: session.issueId, tool: entry.toolName, arguments: parameters,
+        approved: approvalRequired && Boolean(reviewed), actionRequestId: reviewed?.id ?? null }, bearer);
+      for (const key of Object.keys(headers)) if (key.toLowerCase() === "x-paperclip-execution-receipt") delete headers[key];
+      headers["X-Paperclip-Execution-Receipt"] = receipt;
+    }
     let headerSummary = builtHeaders.summary;
     const requestId = `paperclip-tool-${randomUUID()}`;
     const execution: RemoteHttpExecutionAudit = {
@@ -8122,6 +8146,9 @@ export function createToolGatewayService(
         session,
         signedPayload.identityContextId,
       );
+      await assertExecutionReviewer(db, { companyId: invocation.companyId, connectionId: invocation.connectionId,
+      upstreamToolName: invocation.upstreamToolName ?? invocation.toolName,
+      userId: claimed.decidedByUserId ?? claimed.resolvedByUserId });
       session.approvedInvocationId = invocation.id;
       session.approvedSlackInvocationId = invocation.id;
       tool = await findToolForSession(session, invocation.toolName);
@@ -9773,6 +9800,7 @@ export function createToolGatewayService(
 
     async approveActionRequest(input: {
       companyId: string;
+      beforeResolveInTransaction?: (tx: Db) => Promise<void>;
       rememberAction?: boolean;
       issueId?: string;
       interactionId?: string;
@@ -9809,6 +9837,9 @@ export function createToolGatewayService(
           "invocation_not_found",
         );
       }
+      await assertExecutionReviewer(db, { companyId: input.companyId, connectionId: invocation.connectionId,
+        upstreamToolName: invocation.upstreamToolName ?? invocation.toolName, userId: input.actor.userId,
+        rememberAction: input.rememberAction });
       if (input.issueId !== undefined || input.interactionId !== undefined) {
         if (
           !input.issueId ||
@@ -10047,6 +10078,7 @@ export function createToolGatewayService(
 
     async declineActionRequest(input: {
       companyId: string;
+      beforeResolveInTransaction?: (tx: Db) => Promise<void>;
       issueId?: string;
       interactionId?: string;
       actionRequestId: string;

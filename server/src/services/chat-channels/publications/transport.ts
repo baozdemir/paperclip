@@ -125,6 +125,7 @@ function safeCardForPublication(
   if (!payload.card) return null;
   const children = [];
   if (payload.card.body) children.push(CardText(payload.card.body));
+  for (const section of payload.card.bodySections ?? []) children.push(CardText(section));
   const actions = (payload.card.actions ?? []).map((action) =>
     action.type === "callback"
       ? Button({

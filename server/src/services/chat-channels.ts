@@ -56,6 +56,7 @@ import { createPhotonSetupInspection } from "./chat-channels/imessage-photon/set
 import { createChatSdkStatePersistence } from "./chat-channels/sdk-state.js";
 export { createChatSdkStatePersistence } from "./chat-channels/sdk-state.js";
 import { createChatInteractionCallbacks } from "./chat-channels/interactions/callbacks.js";
+import type { ResolveToolAction } from "./chat-channels/telegram/confirmation-actions.js";
 import { createChatInteractionContinuations } from "./chat-channels/interactions/continuations.js";
 import { createGitHubInstallationLifecycle } from "./chat-channels/github/installation-lifecycle.js";
 import { githubChatReviewService } from "./chat-github-reviews.js";
@@ -330,6 +331,7 @@ type ConversationRow = typeof chatConversations.$inferSelect;
 type DeliveryRow = typeof chatDeliveries.$inferSelect;
 
 export interface ChatChannelServiceOptions {
+  resolveToolAction?: ResolveToolAction;
   /**
    * Provider webhooks await only the durable ingress write, then finish task
    * processing outside the provider response budget. Tests may leave this off
@@ -3444,6 +3446,7 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
     scheduleProviderEffect, invalidateRuntime, redactError, persistence, questionResponses,
     scheduleMessageProcessing, processPendingPublications,
     get confirmationResolutionPersistBarrier() { return options.confirmationResolutionPersistBarrier; },
+    get resolveToolAction() { return options.resolveToolAction; },
     get questionFormOpenAuthorizationBarrier() { return options.questionFormOpenAuthorizationBarrier; },
     get questionResolutionPersistBarrier() { return options.questionResolutionPersistBarrier; },
   });
