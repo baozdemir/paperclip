@@ -1678,6 +1678,10 @@ function connectorEnrollmentPrincipal(req: Request): string {
   router.post("/companies/:companyId/tools/connections", validate(createToolConnectionSchema), async (req, res) => {
     const companyId = req.params.companyId as string;
     assertToolAppMutationAccess(req, companyId);
+    if ((req.body.config?.executionReview !== undefined || req.body.transportConfig?.executionReview !== undefined) &&
+      !(await canManageExecutionReview(db, companyId, req.actor.userId))) {
+      throw forbidden("Only active company owners and administrators can configure production execution review");
+    }
     try {
       const connection = await svc.createConnection(companyId, req.body, getActorInfo(req));
       await logActivity(db, {
@@ -2089,7 +2093,7 @@ function connectorEnrollmentPrincipal(req: Request): string {
     const existing = await getAccessibleResource(req, res, svc.getConnection(req.params.connectionId as string), "Tool connection not found");
     if (!existing) return;
     await assertToolConnectionConfigureAccess(req, existing);
-    if (req.body.config?.executionReview !== undefined &&
+    if ((req.body.config?.executionReview !== undefined || req.body.transportConfig?.executionReview !== undefined) &&
       !(await canManageExecutionReview(db, existing.companyId, req.actor.userId))) {
       throw forbidden("Only active company owners and administrators can configure production execution review");
     }

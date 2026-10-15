@@ -2,7 +2,7 @@ import express from "express";
 import request from "supertest";
 import { toolAccessRoutes } from "../routes/tool-access.js";
 import { errorHandler } from "../middleware/index.js";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { companyMemberships, createDb, toolConnections, toolActionRequests, toolInvocations, toolPolicies, type Db } from "@paperclipai/db";
@@ -83,6 +83,20 @@ suite("mandatory production execution review", () => {
       executionReview: { ...f.connection.config.executionReview as object, approverRoles: ["operator"] } } }).expect(allowed ? 200 : 403);
     const [saved] = await db.select().from(toolConnections).where(eq(toolConnections.id, f.connection.id));
     expect((saved.config.executionReview as { approverRoles: string[] }).approverRoles).toEqual(allowed ? ["operator"] : ["owner", "admin"]);
+  });
+
+  it.each(["operator", "owner", "admin"])("requires Owner/Admin when %s creates a guarded connection through either config field", async role => {
+    const f = await fixture(db);
+    const app = express(); app.use(express.json());
+    app.use((req, _res, next) => { req.actor = { type: "board", source: "session", userId: `${role}-user`,
+      companyIds: [f.company.id], memberships: [{ companyId: f.company.id, status: "active", membershipRole: role }] } as never; next(); });
+    app.use("/api", toolAccessRoutes(db)); app.use(errorHandler);
+    for (const field of ["config", "transportConfig"]) {
+      await request(app).post(`/api/companies/${f.company.id}/tools/connections`).send({
+        applicationId: f.connection.applicationId, name: `Guarded ${randomUUID()}`, transport: "mcp_remote",
+        [field]: { ...f.connection.config, executionReview: { ...f.connection.config.executionReview as object, approverRoles: ["operator"] } },
+      }).expect(role === "operator" ? 403 : 201);
+    }
   });
 
 });
