@@ -10,10 +10,10 @@ const update = vi.hoisted(() => vi.fn());
 vi.mock("@/api/tools", () => ({ toolsApi: { updateConnection: update } }));
 let root: Root | undefined;
 let container: HTMLDivElement;
-function render(canConfigure: boolean) {
+function render(canConfigure: boolean, extra: Record<string, unknown> = {}) {
   const connection = { id: "test-connection", config: { url: "https://ops.example/mcp", executionReview: {
     tools: ["run", "start_job"], approverRoles: ["owner", "admin"], nativeSlack: true,
-    receiptTools: ["run", "run_nonprod", "start_job", "start_job_nonprod"],
+    receiptTools: ["run", "run_nonprod", "start_job", "start_job_nonprod"], ...extra,
   } } } as unknown as ToolConnection;
   container = document.createElement("div"); document.body.append(container);
   root = createRoot(container);
@@ -48,4 +48,16 @@ describe("production approval role editor", () => {
     expect(container.textContent).not.toContain("Save approval roles");
     expect(update).not.toHaveBeenCalled();
   });
+  it("preserves provider read exceptions and exact argument reviews when saving roles", async () => {
+    update.mockResolvedValue({});
+    const provider = { tools: ["bitbucketPipeline"], receiptTools: [], previewMode: "arguments",
+      readActions: { bitbucketPipeline: ["list", "get", "step.log"] } };
+    render(true, provider);
+    const save = Array.from(container.querySelectorAll("button")).find(button => button.textContent === "Save approval roles")!;
+    flushSync(() => save.click());
+    await vi.waitFor(() => expect(update).toHaveBeenCalledOnce());
+    expect(update.mock.calls[0]?.[1].config.executionReview).toEqual({ ...provider,
+      approverRoles: ["owner", "admin"], nativeSlack: true });
+  });
+
 });

@@ -9,6 +9,8 @@ export type ExecutionReview = {
   approverRoles: Array<"owner" | "admin" | "operator">;
   nativeSlack: boolean;
   receiptTools: string[];
+  readActions?: Record<string, string[]>;
+  previewMode?: "server" | "arguments";
 };
 
 export function executionReview(config: Record<string, unknown> | null | undefined): ExecutionReview | null {
@@ -16,13 +18,34 @@ export function executionReview(config: Record<string, unknown> | null | undefin
   const raw = config.executionReview;
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw unprocessable("Invalid execution review settings");
   const value = raw as Record<string, unknown>;
-  const names = (items: unknown): items is string[] => Array.isArray(items) && items.length <= 30 && items.every(item => typeof item === "string" && /^[a-zA-Z0-9_-]{1,120}$/.test(item));
-  if (Object.keys(value).some(key => !["tools", "approverRoles", "nativeSlack", "receiptTools"].includes(key))
+  const names = (items: unknown): items is string[] => Array.isArray(items) && items.length <= 200 && items.every(item => typeof item === "string" && /^[a-zA-Z0-9_-]{1,120}$/.test(item));
+  if (Object.keys(value).some(key => !["tools", "approverRoles", "nativeSlack", "receiptTools", "readActions", "previewMode"].includes(key))
     || !names(value.tools) || value.tools.length === 0 || !names(value.receiptTools)
     || !Array.isArray(value.approverRoles) || value.approverRoles.length === 0
     || !value.approverRoles.every(role => ["owner", "admin", "operator"].includes(String(role)))
     || typeof value.nativeSlack !== "boolean") throw unprocessable("Invalid execution review settings");
+  if (value.previewMode !== undefined && !["server", "arguments"].includes(String(value.previewMode)))
+    throw unprocessable("Invalid execution review preview mode");
+  if (value.readActions !== undefined) {
+    if (!value.readActions || typeof value.readActions !== "object" || Array.isArray(value.readActions))
+      throw unprocessable("Invalid execution review read actions");
+    for (const [tool, actions] of Object.entries(value.readActions)) {
+      if (!value.tools.includes(tool) || value.receiptTools.includes(tool) || !Array.isArray(actions)
+        || actions.length === 0 || actions.length > 30
+        || !actions.every(action => typeof action === "string" && /^[a-zA-Z0-9_.-]{1,120}$/.test(action)))
+        throw unprocessable("Read actions must name explicit actions of a governed provider tool");
+    }
+  }
   return value as ExecutionReview;
+}
+
+/** Mixed provider tools may expose a closed set of reads. Missing/new action values always require review. */
+export function requiresIndividualExecutionReview(review: ExecutionReview | null, tool: string, parameters: unknown): boolean {
+  if (!review?.tools.includes(tool)) return false;
+  const reads = review.readActions && Object.prototype.hasOwnProperty.call(review.readActions, tool) ? review.readActions[tool] : undefined;
+  if (!reads || !parameters || typeof parameters !== "object" || Array.isArray(parameters)) return true;
+  const args = parameters as Record<string, unknown>;
+  return !(Object.prototype.hasOwnProperty.call(args, "action") && typeof args.action === "string" && reads.includes(args.action));
 }
 
 export async function connectionExecutionReview(db: Db, companyId: string, connectionId: string | null) {
@@ -64,8 +87,8 @@ export function executionReceipt(input: {
 }
 
 /** Exact JSON review; escape markup so Slack cannot hide command text or emit mentions. */
-export function executionReviewPreview(parameters: Record<string, unknown>): string | null {
-  if (!["server", "command", "reason", "target_revision", "request_id"].every(key => typeof parameters[key] === "string")) return null;
+export function executionReviewPreview(parameters: Record<string, unknown>, mode: "server" | "arguments" = "server"): string | null {
+  if (mode === "server" && !["server", "command", "reason", "target_revision", "request_id"].every(key => typeof parameters[key] === "string")) return null;
   const text = JSON.stringify(parameters, null, 2).replace(/[<>&`]/g, char => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`);
   // Never offer a native approval of redacted or incomplete command text.
   if (text.length > 90_000 || projectSafeChatPublicationText(text) !== text) return null;
