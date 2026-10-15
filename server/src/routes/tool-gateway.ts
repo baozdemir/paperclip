@@ -175,6 +175,7 @@ async function handleMcpGatewayProtocol(
       const resultRecord = result.result && typeof result.result === "object" && !Array.isArray(result.result)
         ? result.result as Record<string, unknown>
         : null;
+      const structuredContent = resultRecord?.data;
       const contentText = typeof resultRecord?.content === "string"
         ? resultRecord.content
         : JSON.stringify(resultRecord?.data ?? result.result ?? null);
@@ -183,7 +184,11 @@ async function handleMcpGatewayProtocol(
         id,
         result: {
           content: [{ type: "text", text: contentText }],
-          structuredContent: resultRecord?.data ?? null,
+          // MCP permits an omitted structuredContent or a JSON object, never null/arrays/primitives.
+          // Idempotent replays carry a bounded result summary rather than provider data.
+          ...(structuredContent && typeof structuredContent === "object" && !Array.isArray(structuredContent)
+            ? { structuredContent }
+            : {}),
           isError: false,
         },
       });
