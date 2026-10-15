@@ -585,6 +585,8 @@ export async function createApp(
   });
   const chatChannels = chatChannelService(db, {
     deferWebhookProcessing: true,
+    resolveToolAction: (input) => input.decision === "approved"
+      ? toolGateway.approveActionRequest(input) : toolGateway.declineActionRequest(input),
     heartbeat: connectionIntentHeartbeat,
     publicBaseUrl: opts.authPublicBaseUrl,
     webhookPublicBaseUrl: opts.chatWebhookPublicBaseUrl,

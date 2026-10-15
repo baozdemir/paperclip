@@ -694,6 +694,30 @@ describeEmbeddedPostgres(
       ).resolves.toEqual([]);
     });
 
+    it("creates native Slack buttons only for server-owned opted-in tool reviews", async () => {
+      const fixture = await seedBoundIssue();
+      const interaction = await issueThreadInteractionService(db).create(
+        { id: fixture.issueId, companyId: fixture.companyId },
+        { kind: "request_confirmation", resolverPolicy: "human_only", payload: {
+          version: 1, prompt: "Approve production change?", acceptLabel: "Approve", rejectLabel: "Reject",
+          toolAction: { version: 1, actionRequestId: randomUUID(), invocationId: randomUUID(),
+            toolName: "run", toolDisplayName: "Production change", connectionId: null, applicationId: null,
+            appDisplayName: null, risk: "write", nativeSlackApproval: true, previewMarkdown: "Server: test-prod; Command: printf test",
+            argumentsSummaryJson: "{}", argumentsHash: "test-hash", expiresAt: new Date(Date.now()+60000).toISOString() },
+        } }, { agentId: fixture.agentId });
+      const cards = await markInteractionCardsPublished(fixture.companyId, interaction.id);
+      const slack = cards.find(row => row.endpointId === fixture.endpointIds.slack)!;
+      expect(slack.payload.card?.actions).toEqual([
+        expect.objectContaining({ type: "callback", label: "Approve" }),
+        expect.objectContaining({ type: "callback", label: "Reject" }),
+      ]);
+      expect(cards.find(row => row.endpointId === fixture.endpointIds.telegram)?.payload.card?.actions)
+        .toEqual([expect.objectContaining({ type: "link" })]);
+      const tokens = await db.select().from(chatActions).where(and(eq(chatActions.companyId, fixture.companyId), eq(chatActions.kind, "confirmation_response")));
+      expect(tokens).toHaveLength(2);
+      expect(tokens.every(row => row.endpointId === fixture.endpointIds.slack && row.payload.interactionId === interaction.id)).toBe(true);
+    });
+
     it("settles native and link-only confirmation cards without inventing controls", async () => {
       const fixture = await seedBoundIssue();
       const service = issueThreadInteractionService(db);

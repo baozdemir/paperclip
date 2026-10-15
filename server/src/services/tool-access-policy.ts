@@ -1,3 +1,4 @@
+import { connectionExecutionReview } from "./execution-review.js";
 import { createHash } from "node:crypto";
 import { and, asc, desc, eq, gt, inArray, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
@@ -1220,6 +1221,12 @@ export function toolAccessPolicyService(db: Db) {
       .map((policy) => ({ policy, conditionEvaluation: evaluatePolicyConditions(policyConditions(policy), ctx) }))
       .filter(({ policy, conditionEvaluation }) => selectorMatches(policy.selectors, ctx) && conditionEvaluation.matched);
     const explicitBlock = matchingPolicies.find(({ policy }) => policy.policyType === "block");
+    const mandatoryReview = await connectionExecutionReview(db, ctx.companyId, ctx.connectionId);
+    if (mandatoryReview?.tools.includes(ctx.upstreamToolName ?? ctx.toolName)) {
+      if (explicitBlock) return decision("deny", "deny_policy_block", explicitBlock.policy.description ?? "Tool access is blocked by policy.", effectiveProfileIds, [explicitBlock.policy.id]);
+      if (!permittedByProfile) return decision("deny", "deny_default", "No effective profile permits this governed action.", effectiveProfileIds, []);
+      return decision("require_approval", "requires_approval_policy", "This production action requires a new individual human review.", effectiveProfileIds, []);
+    }
     for (const { policy, conditionEvaluation } of matchingPolicies) {
       const policyExplanation = {
         policyId: policy.id,
@@ -1666,6 +1673,8 @@ export function toolAccessPolicyService(db: Db) {
       .where(and(eq(toolInvocations.id, actionRequest.invocationId), eq(toolInvocations.companyId, input.companyId)))
       .limit(1);
     if (!invocation) throw notFound("Tool invocation not found");
+    const mandatoryReview = await connectionExecutionReview(db, input.companyId, invocation.connectionId);
+    if (mandatoryReview?.tools.includes(invocation.upstreamToolName ?? invocation.toolName)) throw unprocessable("This action always requires individual review; trust rules are disabled");
     if (invocation.policyDecision !== "require_approval") {
       throw unprocessable("Trust rules must be promoted from approval-required tool actions");
     }

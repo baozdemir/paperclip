@@ -1,3 +1,4 @@
+import { assertExecutionReviewer } from "./execution-review.js";
 import { and, eq } from "drizzle-orm";
 import {
   issues,
@@ -22,6 +23,7 @@ export async function commitToolActionReview(
   db: Db,
   input: {
     companyId: string;
+    beforeResolveInTransaction?: (tx: Db) => Promise<void>;
     actionRequestId: string;
     issueId?: string;
     interactionId?: string;
@@ -73,6 +75,7 @@ export async function commitToolActionReview(
           )
           .for("update")
       : [];
+    await input.beforeResolveInTransaction?.(tx as unknown as Db);
     const [current] = await tx
       .select()
       .from(toolActionRequests)
@@ -117,6 +120,9 @@ export async function commitToolActionReview(
         invocation.agentId !== current.requestedByAgentId)
     )
       throw conflict("Tool invocation context does not match");
+    await assertExecutionReviewer(tx as unknown as Db, { companyId: input.companyId,
+      connectionId: invocation.connectionId, upstreamToolName: invocation.upstreamToolName ?? invocation.toolName,
+      userId: input.actor.userId, rememberAction: input.rememberAction });
     if (current.expiresAt && current.expiresAt <= new Date())
       throw conflict("This review has expired");
     if (current.interactionId) {

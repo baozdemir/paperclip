@@ -1292,6 +1292,7 @@ export interface RequestConfirmationToolActionPayload {
   appDisplayName: string | null;
   risk: "read" | "write" | "destructive";
   rememberActionScope?: string;
+  nativeSlackApproval?: boolean;
   previewMarkdown: string;
   argumentsSummaryJson: string;
   argumentsHash: string;

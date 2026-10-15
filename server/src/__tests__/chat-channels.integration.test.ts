@@ -1,3 +1,4 @@
+import { executionReviewFixture } from "./helpers/execution-review-fixture.js";
 import { toolActionRequests, toolInvocations } from "@paperclipai/db";
 import { GitHubPublicationLeaseLost, withGitHubPublicationLease } from "../services/chat-github-publication-lease.js";
 import { githubChatManagementService } from "../services/chat-github-management.js";
@@ -1216,6 +1217,7 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
         | "reactionReplayConversationLockBarrier"
         | "reactionReplayEndpointLockBarrier"
         | "receiptReactionTransportBarrier"
+        | "resolveToolAction"
         | "resolveNativeQuestion"
         | "renewCredentialMutationLease"
         | "renewConversationDeliveryLease"
@@ -1577,6 +1579,7 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
     overrides: { allowUnlinkedPeople?: boolean; linkedBoardUser?: boolean } & Partial<
       Pick<
         ChatChannelServiceOptions,
+        | "confirmationResolutionPersistBarrier"
         | "credentialMutationLeaseRenewalIntervalMs"
         | "conversationLeaseRenewalIntervalMs"
         | "deferWebhookProcessing"
@@ -1585,6 +1588,7 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
         | "questionResolutionPersistBarrier"
         | "reactionReplayEndpointLockBarrier"
         | "reachAuthorizationBarrier"
+        | "resolveToolAction"
         | "resolveNativeQuestion"
         | "renewCredentialMutationLease"
         | "renewConversationDeliveryLease"
@@ -39728,6 +39732,72 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       .from(issueThreadInteractions)
       .where(eq(issueThreadInteractions.id, expired.interaction.id));
     expect(stillPending.status).toBe("pending");
+  });
+
+  it.each(["owner", "admin"])("executes native Slack production confirmation once for %s and recovers settlement", async role => {
+    const fixture = await seedCompany();
+    let execution: Awaited<ReturnType<typeof executionReviewFixture>>;
+    let crash = true;
+    const { callbacks, endpoint, service } = await configuredSlackEndpoint(fixture, {
+      allowUnlinkedPeople: false, linkedBoardUser: true,
+      confirmationResolutionPersistBarrier: async () => {
+        if (crash) { crash = false; throw new Error("injected Slack settlement crash"); }
+      },
+      resolveToolAction: async input => {
+        const operation = input.decision === "approved" ? execution.gateway.approveActionRequest : execution.gateway.declineActionRequest;
+        return operation({ companyId: input.companyId, issueId: input.issueId, interactionId: input.interactionId, actionRequestId: input.actionRequestId,
+          actor: input.actor, beforeResolveInTransaction: input.beforeResolveInTransaction });
+      },
+    });
+    if (!callbacks.onAction) throw new Error("Slack action callback missing");
+    const channel = makeThread({ channelId: "C-OPS-REVIEW", id: "slack:C-OPS-REVIEW:8100.1", name: "ops-review" });
+    await deliverMessage({ callbacks, endpointId: endpoint.id, thread: channel.thread,
+      message: makeMessage({ id: "8100.1", text: "@maya prepare isolated production test", mentioned: true, userId: "UBOARD" }), trigger: "mention" });
+    await qualifySetupRoundTrip(service, endpoint.id, "UBOARD");
+    await service.test(endpoint.id, "owner-user");
+    const [conversation] = await service.listConversations(endpoint.id);
+    if (!conversation) throw new Error("Slack conversation missing");
+    const runId = randomUUID();
+    await db.insert(heartbeatRuns).values({ id: runId, companyId: fixture.companyId, agentId: fixture.assignedAgentId,
+      status: "running", invocationSource: "assignment", responsibleUserId: "owner-user",
+      contextSnapshot: { issueId: conversation.issueId, source: "chat:slack", endpointId: endpoint.id } });
+    await initializeRunIdentity(db, { companyId: fixture.companyId, runId, issueId: conversation.issueId, responsibleUserId: "owner-user", cause: "instruction" });
+    execution = await executionReviewFixture(db, { companyId: fixture.companyId, agentId: fixture.assignedAgentId, issueId: conversation.issueId, runId });
+    if (role === "admin") execution.parameters.command = "printf '<analysis>visible</analysis> ```'\n# " + "long-reviewed-command ".repeat(300);
+    await expect(execution.gateway.executeTool({ sessionToken: execution.session.token, tool: execution.prod.name, parameters: execution.parameters })).rejects.toMatchObject({ reasonCode: "approval_required" });
+    await service.processPendingPublications();
+    const [request] = await db.select().from(toolActionRequests).where(eq(toolActionRequests.companyId, fixture.companyId));
+    const interaction = (await issueThreadInteractionService(db).listForIssue(conversation.issueId)).find(row => row.payload.toolAction?.actionRequestId === request.id);
+    if (!interaction) throw new Error("Tool interaction missing");
+    const [publication] = await db.select().from(chatPublications).where(eq(chatPublications.idempotencyKey, `interaction:${interaction.id}:${endpoint.id}`));
+    expect(publication, JSON.stringify(publication)).toMatchObject({ state: "published", payload: { card: { actions: [
+      expect.objectContaining({ type: "callback" }), expect.objectContaining({ type: "callback" }),
+    ] } } });
+    expect(JSON.parse(publication.payload.card!.bodySections!.map(section => section.slice(8, -4)).join(""))).toEqual(execution.parameters);
+    const [accept] = await db.select().from(chatActions).where(and(eq(chatActions.endpointId, endpoint.id), eq(chatActions.kind, "confirmation_response"), eq(sql<string>`${chatActions.payload}->>'decision'`, "accept")));
+    const event = { endpointId: endpoint.id, provider: "slack" as const, event: {
+      actionId: accept.providerActionId, adapter: {} as never, messageId: publication.providerMessageId!,
+      openModal: async () => undefined, raw: { type: "block_actions" }, thread: channel.thread,
+      threadId: `slack:C-OPS-REVIEW:${publication.providerMessageId}`,
+      user: { userId: "UBOARD", userName: "reviewer", fullName: "Reviewer", isBot: false, isMe: false, isSystem: false }, value: interaction.id,
+    } };
+    // Linked product/operator users may ask for a change, but cannot approve it.
+    await callbacks.onAction(event);
+    expect(execution.sends).toHaveLength(0);
+    expect((await db.select().from(toolActionRequests).where(eq(toolActionRequests.id, request.id)))[0].status).toBe("pending");
+    await db.update(companyMemberships).set({ membershipRole: role }).where(and(eq(companyMemberships.companyId, fixture.companyId), eq(companyMemberships.principalId, "owner-user")));
+    await callbacks.onAction({ ...event, event: { ...event.event, messageId: "forged-message" } });
+    expect(execution.sends).toHaveLength(0);
+    await expect(callbacks.onAction(event)).rejects.toThrow("injected Slack settlement crash");
+    expect(execution.sends).toHaveLength(1);
+    expect(execution.sends[0].args).toEqual(execution.parameters);
+    expect(execution.sends[0].receipt).toMatchObject({ approved: true, actionRequestId: request.id });
+    await service.processPendingPublications();
+    await callbacks.onAction(event);
+    expect(execution.sends).toHaveLength(1);
+    expect((await db.select().from(toolActionRequests).where(eq(toolActionRequests.id, request.id)))[0].status).toBe("executed");
+    expect((await db.select().from(chatActions).where(eq(chatActions.id, accept.id)))[0].status).toBe("processed");
+    expect(await db.select().from(chatActions).where(and(eq(chatActions.endpointId, endpoint.id), eq(chatActions.kind, "interaction_wakeup")))).toHaveLength(0);
   });
 
   it("renders safe Telegram confirmations as opaque one-use buttons and wakes the resolved task", async () => {

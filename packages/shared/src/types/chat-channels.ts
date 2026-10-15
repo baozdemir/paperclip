@@ -369,6 +369,8 @@ export interface SafeExternalChatCard {
   kind: SafeExternalChatCardKind;
   title: string;
   body?: string;
+  /** Complete bounded review sections, rendered as distinct provider blocks. */
+  bodySections?: string[];
   actions?: SafeExternalChatCardAction[];
 }
 
