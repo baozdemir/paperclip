@@ -37,7 +37,7 @@ export async function executionReviewFixture(db: Db, context?: { companyId: stri
   await db.insert(toolProfileBindings).values({ companyId: company!.id, profileId: profile!.id, targetType: "agent", targetId: agent!.id });
   for (const role of ["owner", "admin", "operator", "viewer"]) await db.insert(companyMemberships).values({ companyId: company!.id, principalType: "user", principalId: `${role}-user`, status: "active", membershipRole: role }).onConflictDoNothing();
   const sends: Array<{ tool: string; receipt: Record<string, unknown>; args: unknown }> = [];
-  const gateway = createToolGatewayService(db, { toolActionSigningSecret: "test-signing-secret", remoteHttpRequest: async (_url, init) => {
+  const gateway = createToolGatewayService(db, { toolActionSigningSecret: "test-only-control-plane-signing-secret-value", remoteHttpRequest: async (_url, init) => {
     const body = JSON.parse(String(init.body));
     const token = new Headers(init.headers).get("x-paperclip-execution-receipt");
     if (!token) throw new Error("Missing execution receipt");

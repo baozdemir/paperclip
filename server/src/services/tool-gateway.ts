@@ -5989,11 +5989,12 @@ export function createToolGatewayService(
       if (approvalRequired && !reviewed) throw new ToolGatewayHttpError(403, "A consumed human approval is required", "execution_receipt_approval_missing");
       if (approvalRequired) await assertExecutionReviewer(db, { companyId: session.companyId, connectionId: connection.id,
         upstreamToolName: entry.toolName, userId: reviewed?.userId });
-      const authorization = Object.entries(headers).find(([key]) => key.toLowerCase() === "authorization")?.[1];
-      const bearer = typeof authorization === "string" && authorization.startsWith("Bearer ") ? authorization.slice(7) : "";
-      const receipt = executionReceipt({ invocationId, companyId: session.companyId, agentId: session.agentId,
+      // Never sign with the connection bearer: it belongs to the credential/transport layer.
+      // The instance approval key is private to the control plane; domain separation avoids cross-protocol reuse.
+      const signingSecret = options.toolActionSigningSecret ?? process.env.PAPERCLIP_TOOL_ACTION_SIGNING_SECRET ?? "";
+      const receipt = executionReceipt({ invocationId, companyId: session.companyId, connectionId: connection.id, agentId: session.agentId,
         issueId: session.issueId, tool: entry.toolName, arguments: parameters,
-        approved: approvalRequired && Boolean(reviewed), actionRequestId: reviewed?.id ?? null }, bearer);
+        approved: approvalRequired && Boolean(reviewed), actionRequestId: reviewed?.id ?? null }, signingSecret);
       for (const key of Object.keys(headers)) if (key.toLowerCase() === "x-paperclip-execution-receipt") delete headers[key];
       headers["X-Paperclip-Execution-Receipt"] = receipt;
     }

@@ -12,20 +12,20 @@ describe("execution review configuration and receipts", () => {
       { ...settings, extra: true }]) expect(() => executionReview({ executionReview: value })).toThrow();
   });
   it("creates the same HMAC/hash contract that the standalone service verifies", () => {
-    const bearer = "test-only-bearer-value-never-a-real-credential";
+    const signingKey = "test-only-control-plane-signing-secret-value";
     const args = { server: "test-prod", command: "printf 'Türkçe ✓'", target_revision: "r", reason: "test" };
-    const token = executionReceipt({ invocationId: "11111111-1111-4111-8111-111111111111", companyId: "22222222-2222-4222-8222-222222222222",
+    const token = executionReceipt({ invocationId: "11111111-1111-4111-8111-111111111111", companyId: "22222222-2222-4222-8222-222222222222", connectionId: "77777777-7777-4777-8777-777777777777",
       agentId: "33333333-3333-4333-8333-333333333333", issueId: "44444444-4444-4444-8444-444444444444", tool: "run",
-      arguments: args, approved: true, actionRequestId: "55555555-5555-4555-8555-555555555555" }, bearer, 1790000000);
+      arguments: args, approved: true, actionRequestId: "55555555-5555-4555-8555-555555555555" }, signingKey, 1790000000);
     const [body, signature] = token.split(".");
-    expect(signature).toBe(createHmac("sha256", bearer).update(body!).digest("hex"));
+    expect(signature).toBe(createHmac("sha256", signingKey).update("paperclip.execution-receipt.v1:" + body!).digest("hex"));
     const payload = JSON.parse(Buffer.from(body!, "base64url").toString());
     const sorted = JSON.stringify({ command: args.command, reason: args.reason, server: args.server, target_revision: args.target_revision });
     expect(payload.argumentsHash).toBe(createHash("sha256").update(sorted).digest("hex"));
     expect(payload).toMatchObject({ approved: true, issuedAt: 1790000000, tool: "run" });
   });
   it("rejects missing receipt credentials", () => {
-    expect(() => executionReceipt({ invocationId: "i", companyId: "c", agentId: "a", issueId: "t", tool: "run",
+    expect(() => executionReceipt({ invocationId: "i", companyId: "c", connectionId: "k", agentId: "a", issueId: "t", tool: "run",
       arguments: {}, approved: true, actionRequestId: "q" }, "")).toThrow();
   });
   it("shows the entire long command as bounded literal sections, including markup and Unicode", () => {
