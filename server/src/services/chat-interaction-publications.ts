@@ -1,4 +1,5 @@
 import { notifyChatPublicationWork } from "./chat-work-notifications.js";
+import { executionReviewSections } from "./execution-review.js";
 import { nativePhotonInteraction } from "./photon/interactions.js";
 import { randomBytes } from "node:crypto";
 import { and, eq, inArray, sql } from "drizzle-orm";
@@ -185,6 +186,11 @@ export function nativeTelegramConfirmation(
   return interaction;
 }
 
+export function nativeSlackToolConfirmation(interaction: IssueThreadInteraction): RequestConfirmationInteraction | null {
+  return interaction.kind === "request_confirmation" && interaction.payload.toolAction?.nativeSlackApproval === true
+    ? interaction : null;
+}
+
 function textForQuestionInteraction(
   interaction: AskUserQuestionsInteraction,
   taskUrl: string | null,
@@ -316,8 +322,9 @@ export async function enqueueIssueInteractionChatPublications(
         }))
       : [];
     const confirmation =
-      endpoint.provider === "telegram" && endpoint.capabilities.actions === true
-        ? nativeTelegramConfirmation(interaction)
+      endpoint.capabilities.actions === true
+        ? endpoint.provider === "telegram" ? nativeTelegramConfirmation(interaction)
+          : endpoint.provider === "slack" ? nativeSlackToolConfirmation(interaction) : null
         : null;
     const confirmationActionTokens = confirmation
       ? (["accept", "reject"] as const).map((decision) => ({
@@ -399,8 +406,11 @@ export async function enqueueIssueInteractionChatPublications(
               : interaction.kind === "request_confirmation"
                 ? interaction.payload.prompt
                 : "Response needed in Paperclip",
+          ...(endpoint.provider === "slack" && confirmation && interaction.kind === "request_confirmation" && interaction.payload.toolAction
+            ? { bodySections: executionReviewSections(interaction.payload.toolAction.previewMarkdown) } : {}),
           body:
-            interaction.kind === "ask_user_questions"
+            endpoint.provider === "slack" && confirmation && interaction.kind === "request_confirmation" && interaction.payload.toolAction
+              ? undefined : interaction.kind === "ask_user_questions"
               ? (question?.helpText ?? undefined)
               : interaction.kind === "request_confirmation"
                 ? // Tool approvals: the plain-language preview; detailsMarkdown (raw arguments) is board-only.

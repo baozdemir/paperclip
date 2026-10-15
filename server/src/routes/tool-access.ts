@@ -3,6 +3,7 @@ import { aiConnectionRouterPluginKey } from "@paperclipai/shared";
 import { aiConnectionRouterService } from "../services/ai-connection-router.js";
 import { composioAppSetupSchema, composioAppsRefreshSchema, composioAppsSyncSchema, composioAppAccountSchema } from "@paperclipai/shared";
 import { aggregatorAppsSyncSchema, aggregatorAppsRefreshSchema, arcadeDiscoverySetupSchema } from "@paperclipai/shared/aggregator-apps";
+import { canManageExecutionReview, connectionExecutionReview } from "../services/execution-review.js";
 import { Router, type Request, type Response } from "express";
 import type { Db } from "@paperclipai/db";
 import { agents, companies, connectionGrants, issueThreadInteractions, toolConnectionInstalls } from "@paperclipai/db";
@@ -553,9 +554,13 @@ function connectorEnrollmentPrincipal(req: Request): string {
 
   async function assertToolConnectionConfigureAccess(
     req: Request,
-    connection: { companyId: string; createdByUserId?: string | null },
+    connection: { id?: string; companyId: string; createdByUserId?: string | null },
   ) {
     activeToolMembership(req, connection.companyId);
+    if (connection.id && await connectionExecutionReview(db, connection.companyId, connection.id) &&
+      !(await canManageExecutionReview(db, connection.companyId, req.actor.userId))) {
+      throw forbidden("Only active company owners and administrators can configure production execution review");
+    }
     if (await isToolConnectionManager(req, connection.companyId)) return;
     if (req.actor.userId && connection.createdByUserId === req.actor.userId) return;
     throw forbidden(
@@ -655,7 +660,9 @@ function connectorEnrollmentPrincipal(req: Request): string {
     const isManager = await isToolConnectionManagerQuiet(req, connection.companyId);
     const mutationCapable = membership.unrestricted || (membership.isActive && !membership.isViewer);
     const isCreator = Boolean(req.actor.userId && connection.createdByUserId === req.actor.userId);
-    const canConfigure = isManager || (mutationCapable && isCreator);
+    const governed = await connectionExecutionReview(db, connection.companyId, connection.id);
+    const canConfigure = (isManager || (mutationCapable && isCreator)) &&
+      (!governed || await canManageExecutionReview(db, connection.companyId, req.actor.userId));
     const editableAgentIds: string[] = [];
     if (mutationCapable) {
       const companyAgents = await db
@@ -2143,6 +2150,10 @@ function connectorEnrollmentPrincipal(req: Request): string {
     if (!existing) return;
     await assertToolConnectionConfigureAccess(req, existing);
     if (aiConnectionRouterPluginKey(existing)) throw badRequest("Update this connection pool through its pool settings.");
+    if (req.body.config?.executionReview !== undefined &&
+      !(await canManageExecutionReview(db, existing.companyId, req.actor.userId))) {
+      throw forbidden("Only active company owners and administrators can configure production execution review");
+    }
     const connection = await svc.updateConnection(existing.id, req.body);
     const lifecycleChanges = classifyConnectionUpdate(
       { enabled: existing.enabled, config: existing.config },

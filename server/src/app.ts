@@ -624,6 +624,8 @@ export async function createApp(
   const chatChannels = chatChannelService(db, {
     allowLocalVoiceBoard: opts.deploymentMode === "local_trusted",
     deferWebhookProcessing: true,
+    resolveToolAction: (input) => input.decision === "approved"
+      ? toolGateway.approveActionRequest(input) : toolGateway.declineActionRequest(input),
     heartbeat: connectionIntentHeartbeat,
     publicBaseUrl: opts.authPublicBaseUrl,
     githubWizardOrigin: opts.deploymentMode === "local_trusted"

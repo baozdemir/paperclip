@@ -363,6 +363,7 @@ import {
   enqueueTerminalIssueInteractionChatPublications,
   nativeChatQuestion,
   nativeTelegramConfirmation,
+  nativeSlackToolConfirmation,
   TELEGRAM_CALLBACK_DATA_LIMIT_BYTES,
   telegramChatSdkCallbackData,
 } from "./chat-interaction-publications.js";
@@ -1412,6 +1413,11 @@ function providerEffectPayload(
 }
 
 export interface ChatChannelServiceOptions {
+  resolveToolAction?: (input: {
+    companyId: string; issueId: string; interactionId: string; actionRequestId: string;
+    decision: "approved" | "rejected"; actor: { userId: string };
+    beforeResolveInTransaction: (tx: Db) => Promise<void>;
+  }) => Promise<unknown>;
   /**
    * Provider webhooks await only the durable ingress write, then finish task
    * processing outside the provider response budget. Tests may leave this off
@@ -1989,6 +1995,7 @@ function safeCardForPublication(
   if (!payload.card) return null;
   const children = [];
   if (payload.card.body) children.push(CardText(payload.card.body));
+  for (const section of payload.card.bodySections ?? []) children.push(CardText(section));
   const actions = (payload.card.actions ?? []).map((action) =>
     action.type === "callback"
       ? Button({
@@ -19653,7 +19660,7 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
       !conversation ||
       !publication ||
       !endpoint ||
-      endpoint.provider !== "telegram" ||
+      !["telegram", "slack"].includes(endpoint.provider) ||
       publication.conversationId !== conversation.id ||
       publication.payload.interactionId !== token.interactionId
     ) {
@@ -19678,7 +19685,7 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
     if (
       !interaction ||
       interaction.kind !== "request_confirmation" ||
-      !nativeTelegramConfirmation(interaction)
+      !(endpoint.provider === "slack" ? nativeSlackToolConfirmation(interaction) : nativeTelegramConfirmation(interaction))
     ) {
       await db
         .update(chatActions)
@@ -19778,6 +19785,7 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
     }
     const resolvedByUserId = interaction.resolvedByUserId;
     const shouldWake =
+      !interaction.payload.toolAction &&
       Boolean(issue.assigneeAgentId) &&
       issue.status !== "done" &&
       issue.status !== "cancelled" &&
@@ -20755,8 +20763,8 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
     }
     if (interaction.kind === "request_confirmation") {
       if (
-        event.provider !== "telegram" ||
-        !nativeTelegramConfirmation(interaction)
+        !(event.provider === "telegram" ? nativeTelegramConfirmation(interaction)
+          : event.provider === "slack" ? nativeSlackToolConfirmation(interaction) : null)
       ) {
         return deny(safelyKnown);
       }
@@ -20828,7 +20836,22 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
 
       const decision = tokenPayload.decision;
       try {
-        if (decision === "accept") {
+        if (event.provider === "slack" && nativeSlackToolConfirmation(interaction)) {
+          if (!options.resolveToolAction) return deny(safelyKnown);
+          await options.resolveToolAction({ companyId: issue.companyId, issueId: issue.id, interactionId: interaction.id,
+            actionRequestId: interaction.payload.toolAction!.actionRequestId,
+            decision: decision === "accept" ? "approved" : "rejected", actor: { userId: principal.userId! },
+            beforeResolveInTransaction: (tx) => requireCurrentExternalActionAuthorization(tx as unknown as DbTransaction, {
+              conversationId: conversation.id, endpointId: record.endpoint.id, expectedUserId: principal.userId!,
+              principalId: principal.principal.id, runtimeContext }),
+          });
+          const resolved = (await issueThreadInteractionService(db).listForIssue(issue.id)).find(row => row.id === interaction.id);
+          if (!resolved || !["accepted", "rejected"].includes(resolved.status)) return deny(safelyKnown);
+          await db.update(chatActions).set({ principalId: principal.principal.id, status: "processing",
+            payload: { ...tokenPayload, messageId: event.event.messageId, actionId: event.event.actionId, value: null },
+            result: { code: "confirmation_resolution_committed_by_provider", interactionId: resolved.id, interactionStatus: resolved.status },
+            updatedAt: new Date() }).where(and(eq(chatActions.id, action.id), eq(chatActions.status, "issued")));
+        } else if (decision === "accept") {
           await issueThreadInteractionService(db).acceptInteraction(
             issue,
             interaction.id,
@@ -20930,7 +20953,7 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
           );
         }
       } catch (error) {
-        if (isExternalActionAuthorizationChange(error)) {
+        if (isExternalActionAuthorizationChange(error) || (error instanceof HttpError && error.status === 403)) {
           return deny(safelyKnown);
         }
         const currentStatus = await db

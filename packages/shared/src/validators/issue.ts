@@ -1545,6 +1545,7 @@ export const requestConfirmationToolActionPayloadSchema = z.object({
   appDisplayName: z.string().trim().min(1).max(500).nullable(),
   risk: z.enum(["read", "write", "destructive"]),
   rememberActionScope: z.string().trim().min(1).max(1000).optional(),
+  nativeSlackApproval: z.boolean().optional(),
   previewMarkdown: z.string().trim().min(1).max(20000),
   argumentsSummaryJson: z.string().max(20000),
   argumentsHash: z.string().trim().min(1).max(255),
