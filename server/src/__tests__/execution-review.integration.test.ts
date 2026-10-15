@@ -5,7 +5,7 @@ import { errorHandler } from "../middleware/index.js";
 import { randomBytes, randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { companyMemberships, createDb, toolConnections, toolActionRequests, toolInvocations, toolPolicies, type Db } from "@paperclipai/db";
+import { companyMemberships, createDb, toolConnections, toolActionRequests, toolInvocations, toolPolicies, toolCatalogEntries, issueThreadInteractions, type Db } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { executionReviewFixture as fixture } from "./helpers/execution-review-fixture.js";
 
@@ -97,6 +97,47 @@ suite("mandatory production execution review", () => {
         [field]: { ...f.connection.config, executionReview: { ...f.connection.config.executionReview as object, approverRoles: ["operator"] } },
       }).expect(role === "operator" ? 403 : 201);
     }
+  });
+
+  it.each(["owner", "admin"])("keeps pipeline log reads free and requires %s for each run despite broad allow", async role => {
+    const f = await fixture(db);
+    await db.update(toolConnections).set({ config: { ...f.connection.config, executionReview: {
+      tools: ["bitbucketPipeline", ...Array.from({ length: 34 }, (_, i) => `cloud_mutation_${i}`)],
+      approverRoles: ["owner", "admin"], receiptTools: [], nativeSlack: true,
+      previewMode: "arguments", readActions: { bitbucketPipeline: ["list", "get", "steps", "step.get", "step.log"] },
+    } } }).where(eq(toolConnections.id, f.connection.id));
+    await db.insert(toolCatalogEntries).values({ companyId: f.company.id, applicationId: f.connection.applicationId,
+      connectionId: f.connection.id, entryKind: "tool", name: "bitbucketPipeline", toolName: "bitbucketPipeline",
+      riskLevel: "write", isWrite: true, isReadOnly: false, status: "active", versionHash: randomUUID(), schemaHash: randomUUID(),
+      inputSchema: { type: "object", properties: { action: { type: "string" } }, required: ["action"] } });
+    await db.insert(toolPolicies).values({ companyId: f.company.id, name: "Historical broad allow", policyType: "allow", priority: 1,
+      selectors: { connectionId: f.connection.id } });
+    const { createToolGatewayService } = await import("../services/tool-gateway.js");
+    const sends: unknown[] = [];
+    const gateway = createToolGatewayService(db, { toolActionSigningSecret: "test-only-control-plane-signing-secret-value",
+      remoteHttpRequest: async (_url, init) => {
+        const body = JSON.parse(String(init.body)); sends.push(body.params.arguments);
+        return Response.json({ jsonrpc: "2.0", id: body.id, result: { content: [{ type: "text", text: "provider fixture" }] } });
+      } });
+    const session = await gateway.createSession({ companyId: f.company.id, agentId: f.agent.id, runId: f.session.runId });
+    const tool = (await gateway.listToolsForSession(session.token)).find(t => t.upstreamToolName === "bitbucketPipeline")!;
+    for (const action of ["list", "get", "steps", "step.get", "step.log"]) {
+      await gateway.executeTool({ sessionToken: session.token, tool: tool.name, parameters: { action } });
+    }
+    expect(sends).toHaveLength(5);
+    expect(await db.select().from(toolActionRequests).where(eq(toolActionRequests.companyId, f.company.id))).toHaveLength(0);
+    const parameters = { action: "run", repository: "fixture", target: { ref_type: "branch", ref_name: "master" } };
+    await expect(gateway.executeTool({ sessionToken: session.token, tool: tool.name, parameters })).rejects.toMatchObject({ reasonCode: "approval_required" });
+    const [pending] = await db.select().from(toolActionRequests).where(eq(toolActionRequests.companyId, f.company.id));
+    const [interaction] = await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, pending!.interactionId!));
+    expect(interaction!.payload).toMatchObject({ toolAction: { nativeSlackApproval: true } });
+    await expect(gateway.approveActionRequest({ companyId: f.company.id, actionRequestId: pending!.id, actor: { userId: "operator-user" } })).rejects.toThrow("role cannot review");
+    expect(sends).toHaveLength(5);
+    const decision = { companyId: f.company.id, actionRequestId: pending!.id, actor: { userId: `${role}-user` } };
+    await Promise.all([gateway.approveActionRequest(decision), gateway.approveActionRequest(decision)]);
+    expect(sends).toHaveLength(6); expect(sends[5]).toEqual(parameters);
+    await expect(gateway.executeTool({ sessionToken: session.token, tool: tool.name, parameters: { action: "future-mutation" } })).rejects.toMatchObject({ reasonCode: "approval_required" });
+    expect(sends).toHaveLength(6);
   });
 
 });

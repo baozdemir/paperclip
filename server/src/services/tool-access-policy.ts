@@ -1,4 +1,4 @@
-import { connectionExecutionReview } from "./execution-review.js";
+import { connectionExecutionReview, requiresIndividualExecutionReview } from "./execution-review.js";
 import { createHash } from "node:crypto";
 import { and, asc, desc, eq, gt, inArray, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
@@ -1222,7 +1222,7 @@ export function toolAccessPolicyService(db: Db) {
       .filter(({ policy, conditionEvaluation }) => selectorMatches(policy.selectors, ctx) && conditionEvaluation.matched);
     const explicitBlock = matchingPolicies.find(({ policy }) => policy.policyType === "block");
     const mandatoryReview = await connectionExecutionReview(db, ctx.companyId, ctx.connectionId);
-    if (mandatoryReview?.tools.includes(ctx.upstreamToolName ?? ctx.toolName)) {
+    if (requiresIndividualExecutionReview(mandatoryReview, ctx.upstreamToolName ?? ctx.toolName, ctx.arguments)) {
       if (explicitBlock) return decision("deny", "deny_policy_block", explicitBlock.policy.description ?? "Tool access is blocked by policy.", effectiveProfileIds, [explicitBlock.policy.id]);
       if (!permittedByProfile) return decision("deny", "deny_default", "No effective profile permits this governed action.", effectiveProfileIds, []);
       return decision("require_approval", "requires_approval_policy", "This production action requires a new individual human review.", effectiveProfileIds, []);
