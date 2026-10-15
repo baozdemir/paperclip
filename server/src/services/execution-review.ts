@@ -54,13 +54,13 @@ function canonical(value: unknown): string {
 }
 
 export function executionReceipt(input: {
-  invocationId: string; companyId: string; agentId: string; issueId: string; tool: string;
+  invocationId: string; companyId: string; connectionId: string; agentId: string; issueId: string; tool: string;
   arguments: unknown; approved: boolean; actionRequestId: string | null;
-}, bearer: string, issuedAt = Math.floor(Date.now() / 1000)) {
-  if (bearer.length < 32) throw forbidden("Execution receipts require a dedicated generated bearer");
+}, signingSecret: string, issuedAt = Math.floor(Date.now() / 1000)) {
+  if (signingSecret.length < 32) throw forbidden("Execution receipts require a private control-plane signing secret");
   const { arguments: args, ...context } = input;
   const body = Buffer.from(canonical({ ...context, argumentsHash: createHash("sha256").update(canonical(args)).digest("hex"), issuedAt })).toString("base64url");
-  return `${body}.${createHmac("sha256", bearer).update(body).digest("hex")}`;
+  return `${body}.${createHmac("sha256", signingSecret).update("paperclip.execution-receipt.v1:" + body).digest("hex")}`;
 }
 
 /** Exact JSON review; escape markup so Slack cannot hide command text or emit mentions. */
