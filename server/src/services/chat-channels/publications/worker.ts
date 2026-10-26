@@ -949,6 +949,22 @@ export function createChatPublicationWorker(db: Db, options: PublicationWorkerOp
                   )
                     ? null
                     : publication.commentId;
+                  // Lock the endpoint before the message link's foreign key
+                  // locks the conversation: inbound wakeup authorization takes
+                  // them in that order, and the opposite order deadlocked.
+                  await tx
+                    .update(chatEndpoints)
+                    .set({
+                      lastPublicationAt: committedAt,
+                      updatedAt: committedAt,
+                    })
+                    .where(
+                      and(
+                        eq(chatEndpoints.id, authorizationClaim.endpoint.id),
+                        inArray(chatEndpoints.status, ["verifying", "active"]),
+                        sql`coalesce((${chatEndpoints.setup}->>'runtimeGeneration')::integer, 0) = ${currentPublicationRuntimeContext.generation}`,
+                      ),
+                    );
                   const messageLinkInsert = tx.insert(chatMessageLinks).values({
                     companyId: publication.companyId,
                     endpointId: publication.endpointId,
@@ -973,19 +989,6 @@ export function createChatPublicationWorker(db: Db, options: PublicationWorkerOp
                   } else {
                     await messageLinkInsert.onConflictDoNothing();
                   }
-                  await tx
-                    .update(chatEndpoints)
-                    .set({
-                      lastPublicationAt: committedAt,
-                      updatedAt: committedAt,
-                    })
-                    .where(
-                      and(
-                        eq(chatEndpoints.id, authorizationClaim.endpoint.id),
-                        inArray(chatEndpoints.status, ["verifying", "active"]),
-                        sql`coalesce((${chatEndpoints.setup}->>'runtimeGeneration')::integer, 0) = ${currentPublicationRuntimeContext.generation}`,
-                      ),
-                    );
                 }
                 if (authorizationActionId) {
                   const processedAuthorization = await tx
