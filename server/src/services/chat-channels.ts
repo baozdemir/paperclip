@@ -1992,6 +1992,28 @@ function redactError(error: unknown): string {
   return redactSensitiveText(withoutTelegramBotTokens).slice(0, MAX_ERROR_TEXT);
 }
 
+// A delivery disposition ("could not confirm") does not say why it failed.
+// A failed query reports its driver error (e.g. 40P01) and SQL text, never its
+// parameters: those can carry message content.
+function redactedErrorCause(error: unknown) {
+  const rawQuery =
+    error instanceof Error ? (error as { query?: unknown }).query : undefined;
+  const query =
+    typeof rawQuery === "string" ? rawQuery.slice(0, 500) : undefined;
+  const root =
+    query === undefined ? error : (error as Error).cause ?? "Failed query";
+  const code =
+    root && typeof root === "object"
+      ? (root as { code?: unknown }).code
+      : undefined;
+  return {
+    name: root instanceof Error ? root.name : typeof root,
+    ...(typeof code === "string" || typeof code === "number" ? { code } : {}),
+    message: redactError(root),
+    ...(query === undefined ? {} : { query }),
+  };
+}
+
 async function attemptProviderPublication<T>(
   send: () => Promise<T>,
 ): Promise<T> {
@@ -35595,6 +35617,7 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
           endpointId: publication.endpointId,
           publicationId: publication.id,
           error: failure,
+          cause: redactedErrorCause(error),
           disposition: disposition.kind,
         },
         "chat publication failed",
@@ -37250,6 +37273,7 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
               endpointId: publication.endpointId,
               publicationId: publication.id,
               error: redactError(finalizationError),
+              cause: redactedErrorCause(error),
             },
             "could not durably finalize chat publication failure",
           );

@@ -29110,6 +29110,86 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
     }
   });
 
+  describe("Unconfirmed Slack run progress", () => {
+    async function unconfirmedWorkingFixture() {
+      const fixture = await seedCompany();
+      const { callbacks, endpoint, runtime, service } =
+        await configuredSlackEndpoint(fixture);
+      const thread = makeThread({
+        channelId: "C-UNCONFIRMED",
+        id: "slack:C-UNCONFIRMED:4060.1",
+        name: "unconfirmed-progress",
+      });
+      await deliverMessage({
+        callbacks,
+        endpointId: endpoint.id,
+        thread: thread.thread,
+        message: makeMessage({
+          id: "4060.1",
+          text: "@maya open a Jira task for this",
+          mentioned: true,
+        }),
+        trigger: "mention",
+      });
+      const [conversation] = await db
+        .select()
+        .from(chatConversations)
+        .where(eq(chatConversations.endpointId, endpoint.id));
+      const runId = randomUUID();
+      await db.insert(heartbeatRuns).values({
+        id: runId,
+        companyId: fixture.companyId,
+        agentId: fixture.assignedAgentId,
+        status: "running",
+        contextSnapshot: await chatWakeContext({
+          endpointId: endpoint.id,
+          issueId: conversation.issueId,
+          provider: "slack",
+          providerMessageId: "4060.1",
+        }),
+      });
+      const providerRuntime = runtime.endpoints.get(endpoint.id);
+      if (!providerRuntime) throw new Error("Expected Slack runtime");
+      // Slack may have shown the indicator, but Paperclip cannot confirm it.
+      providerRuntime.postError = new Error("socket reset after write");
+      const [working] = await db
+        .insert(chatPublications)
+        .values({
+          companyId: fixture.companyId,
+          endpointId: endpoint.id,
+          conversationId: conversation.id,
+          issueId: conversation.issueId,
+          idempotencyKey: `run:${runId}:working:${endpoint.id}`,
+          payload: { text: "Maya is working…", progressState: "working" },
+          state: "pending",
+        })
+        .returning();
+      await service.processPendingPublications();
+      providerRuntime.postError = null;
+      return { conversation, fixture, providerRuntime, runId, service, working };
+    }
+
+    it("logs the provider error behind an unconfirmed publication", async () => {
+      const warning = vi.spyOn(chatAttachmentLogger, "warn");
+      try {
+        const f = await unconfirmedWorkingFixture();
+        expect(warning).toHaveBeenCalledWith(
+          expect.objectContaining({
+            publicationId: f.working.id,
+            disposition: "delivery_unknown",
+            cause: expect.objectContaining({
+              name: "Error",
+              message: "socket reset after write",
+            }),
+          }),
+          "chat publication failed",
+        );
+      } finally {
+        warning.mockRestore();
+      }
+    });
+  });
+
   it("coalesces one Slack run's lifecycle and final response despite an interleaved task control", async () => {
     const fixture = await seedCompany();
     const { callbacks, endpoint, runtime, service } =
