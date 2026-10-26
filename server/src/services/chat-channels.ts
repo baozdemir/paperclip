@@ -3416,7 +3416,7 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
     nonDirectDestinationAllowed, resolveCredentials, runtimeCallbackEndpoint, FailedChatRetryPublicationReadError,
   });
   const { finalizePublicationFailure } = createChatPublicationFailures(db, {
-    FailedChatRetryPublicationReadError, MAX_ERROR_TEXT, getTaskBaseUrl, invalidateRuntime, runtimeCallbackEndpoint,
+    FailedChatRetryPublicationReadError, MAX_ERROR_TEXT, getTaskBaseUrl, invalidateRuntime, runtimeCallbackEndpoint, redactError,
   });
   const { ensureDurablePublicationTransport } = createChatPublicationPreparation(db, {
     runPublicationToReplace,

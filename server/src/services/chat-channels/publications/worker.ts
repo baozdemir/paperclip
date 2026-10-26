@@ -1,4 +1,5 @@
 import { createGitHubPublicationPolicy } from "../github/publication-policy.js";
+import { redactedErrorCause } from "./failures.js";
 
 import { createTeamsFileDelivery } from "../microsoft-teams/file-delivery.js";
 
@@ -440,6 +441,7 @@ export function createChatPublicationWorker(db: Db, options: PublicationWorkerOp
               endpointId: publication.endpointId,
               publicationId: publication.id,
               error: redactError(finalizationError),
+              cause: redactedErrorCause(error, redactError),
             },
             "could not durably finalize chat publication failure",
           );

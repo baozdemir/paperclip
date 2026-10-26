@@ -38,15 +38,38 @@ import { safeChatTaskUrl } from "../../chat-task-url.js";
 import { classifyChatPublicationError } from "../../chat-publication-errors.js";
 
 import { ATTACHMENT_FAILURE_NOTICE_PREFIX, definiteAttachmentProviderRejection, attachmentFailureKind } from "./policy.js";
+// A delivery disposition ("could not confirm") does not say why it failed.
+// A failed query reports its driver error (e.g. 40P01) and SQL text, never its
+// parameters: those can carry message content.
+export function redactedErrorCause(error: unknown, redactError: (error: unknown) => string) {
+  const rawQuery =
+    error instanceof Error ? (error as { query?: unknown }).query : undefined;
+  const query =
+    typeof rawQuery === "string" ? rawQuery.slice(0, 500) : undefined;
+  const root =
+    query === undefined ? error : (error as Error).cause ?? "Failed query";
+  const code =
+    root && typeof root === "object"
+      ? (root as { code?: unknown }).code
+      : undefined;
+  return {
+    name: root instanceof Error ? root.name : typeof root,
+    ...(typeof code === "string" || typeof code === "number" ? { code } : {}),
+    message: redactError(root),
+    ...(query === undefined ? {} : { query }),
+  };
+}
+
 type PublicationFailuresOptions = {
   FailedChatRetryPublicationReadError: ReturnType<typeof createChatFailedRunRetry>["FailedChatRetryPublicationReadError"];
   MAX_ERROR_TEXT: number;
   getTaskBaseUrl: () => string | null | undefined;
   invalidateRuntime: (endpointId: string) => Promise<boolean>;
   runtimeCallbackEndpoint: (tx: DbTransaction, endpointId: string, context: LifecycleRuntimeFence, statuses: EndpointRow["status"][]) => Promise<EndpointRow | null>;
+  redactError: (error: unknown) => string;
 };
 export function createChatPublicationFailures(db: Db, options: PublicationFailuresOptions) {
-  const { FailedChatRetryPublicationReadError, MAX_ERROR_TEXT, getTaskBaseUrl, invalidateRuntime, runtimeCallbackEndpoint } = options;
+  const { FailedChatRetryPublicationReadError, MAX_ERROR_TEXT, getTaskBaseUrl, invalidateRuntime, runtimeCallbackEndpoint, redactError } = options;
 
 
   async function finalizePublicationFailure(
@@ -315,6 +338,7 @@ export function createChatPublicationFailures(db: Db, options: PublicationFailur
           endpointId: publication.endpointId,
           publicationId: publication.id,
           error: failure,
+          cause: redactedErrorCause(error, redactError),
           disposition: disposition.kind,
         },
         "chat publication failed",
