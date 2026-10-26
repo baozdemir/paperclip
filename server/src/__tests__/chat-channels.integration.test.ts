@@ -32194,6 +32194,40 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       return { conversation, fixture, providerRuntime, runId, service, working };
     }
 
+    it("does not hold the final reply behind an unconfirmed working message", async () => {
+      const f = await unconfirmedWorkingFixture();
+      const unknown = async () =>
+        db
+          .select()
+          .from(chatPublications)
+          .where(eq(chatPublications.id, f.working.id))
+          .then((rows) => rows[0]);
+      expect(await unknown()).toMatchObject({
+        state: "delivery_unknown",
+        providerMessageId: null,
+      });
+
+      const comment = await addSelectedChatFinal({
+        agentId: f.fixture.assignedAgentId,
+        body: "Opened the Jira task.",
+        companyId: f.fixture.companyId,
+        issueId: f.conversation.issueId,
+        runId: f.runId,
+      });
+      await f.service.processPendingPublications();
+
+      const [reply] = await db
+        .select()
+        .from(chatPublications)
+        .where(eq(chatPublications.commentId, comment.id));
+      expect(reply).toMatchObject({ state: "published" });
+      expect(f.providerRuntime.posts.map((post) => post.text)).toEqual([
+        expect.stringContaining("Opened the Jira task."),
+      ]);
+      // The indicator itself stays unconfirmed and is never replayed implicitly.
+      expect(await unknown()).toMatchObject({ state: "delivery_unknown" });
+    });
+
     it("logs the provider error behind an unconfirmed publication", async () => {
       const warning = vi.spyOn(chatAttachmentLogger, "warn");
       try {
