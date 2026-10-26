@@ -79,7 +79,7 @@ import {
   shouldStreamSafePublicationText,
 } from "../../chat-publication-stream.js";
 
-import { publicationTransportOrderKey } from "./order.js";
+import { publicationTransportOrderKey, holdsLaterPublications } from "./order.js";
 import { isExplicitOperatorPublication } from "./policy.js";
 import type { EndpointRecord } from "../runtime-types.js";
 import type { createChatPublicationAuthorization } from "./authorization.js";
@@ -402,12 +402,7 @@ export function createChatPublicationWorker(db: Db, options: PublicationWorkerOp
               ),
             ),
           ),
-          inArray(chatPublications.state, [
-            "pending",
-            "retry",
-            "streaming",
-            "delivery_unknown",
-          ]),
+          holdsLaterPublications(chatPublications),
         ),
       )
       .limit(1)

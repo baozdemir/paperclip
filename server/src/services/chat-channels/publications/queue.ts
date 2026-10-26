@@ -32,7 +32,7 @@ import {
 
 import { logger } from "../../../middleware/logger.js";
 
-import { publicationTransportOrderKey, publicationPrecedes } from "./order.js";
+import { publicationTransportOrderKey, publicationPrecedes, holdsLaterPublications } from "./order.js";
 import type { createChatPublicationWorker } from "./worker.js";
 type PublicationQueueOptions = {
   PUBLICATION_ENDPOINT_CONCURRENCY: number;
@@ -167,12 +167,7 @@ export function createChatPublicationQueue(db: Db, options: PublicationQueueOpti
                 chatPublications.conversationId,
               ),
               publicationPrecedes(earlierPublication, chatPublications),
-              inArray(earlierPublication.state, [
-                "pending",
-                "retry",
-                "streaming",
-                "delivery_unknown",
-              ]),
+              holdsLaterPublications(earlierPublication),
             ),
           ),
       ),
