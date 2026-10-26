@@ -32249,6 +32249,104 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
     });
   });
 
+  it("commits a Slack publication while a run start owns its endpoint", async () => {
+    // Inbound wakeup authorization locks the endpoint, then the conversation.
+    // A publication commit that took the conversation first (message link FK)
+    // deadlocked against it after Slack had already accepted the message.
+    const fixture = await seedCompany();
+    const { callbacks, endpoint, runtime, service } =
+      await configuredSlackEndpoint(fixture);
+    const thread = makeThread({
+      channelId: "C-LOCK-ORDER",
+      id: "slack:C-LOCK-ORDER:4061.1",
+      name: "lock-order",
+    });
+    await deliverMessage({
+      callbacks,
+      endpointId: endpoint.id,
+      thread: thread.thread,
+      message: makeMessage({
+        id: "4061.1",
+        text: "@maya start a run",
+        mentioned: true,
+      }),
+      trigger: "mention",
+    });
+    const [conversation] = await db
+      .select()
+      .from(chatConversations)
+      .where(eq(chatConversations.endpointId, endpoint.id));
+    const runId = randomUUID();
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId: fixture.companyId,
+      agentId: fixture.assignedAgentId,
+      status: "running",
+      contextSnapshot: await chatWakeContext({
+        endpointId: endpoint.id,
+        issueId: conversation.issueId,
+        provider: "slack",
+        providerMessageId: "4061.1",
+      }),
+    });
+    const [working] = await db
+      .insert(chatPublications)
+      .values({
+        companyId: fixture.companyId,
+        endpointId: endpoint.id,
+        conversationId: conversation.id,
+        issueId: conversation.issueId,
+        idempotencyKey: `run:${runId}:working:${endpoint.id}`,
+        payload: { text: "Maya is working…", progressState: "working" },
+        state: "pending",
+      })
+      .returning();
+    const providerRuntime = runtime.endpoints.get(endpoint.id);
+    if (!providerRuntime) throw new Error("Expected Slack runtime");
+    let held!: (pid: number) => void;
+    const endpointHeld = new Promise<number>((resolve) => {
+      held = resolve;
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let runStart: Promise<void> | undefined;
+    providerRuntime.postHook = async () => {
+      providerRuntime.postHook = undefined;
+      runStart = db.transaction(async (tx) => {
+        await tx.execute(
+          sql`select id from chat_endpoints where id = ${endpoint.id} for no key update`,
+        );
+        const [row] = (await tx.execute(
+          sql`select pg_backend_pid() as pid`,
+        )) as unknown as Array<{ pid: number }>;
+        held(row!.pid);
+        await gate;
+        await tx.execute(
+          sql`select id from chat_conversations where id = ${conversation.id} for update`,
+        );
+      });
+      await endpointHeld;
+    };
+    const publishing = service.processPendingPublications();
+    const pid = await endpointHeld;
+    await vi.waitFor(async () => {
+      const [row] = (await db.execute(sql`select exists (
+        select 1 from pg_stat_activity where datname = current_database()
+          and ${pid} = any(pg_blocking_pids(pid))
+      ) as blocked`)) as unknown as Array<{ blocked: boolean }>;
+      expect(row!.blocked).toBe(true);
+    });
+    release();
+    await Promise.all([runStart, publishing]);
+    const [stored] = await db
+      .select()
+      .from(chatPublications)
+      .where(eq(chatPublications.id, working.id));
+    expect(stored).toMatchObject({ state: "published" });
+  });
+
   it("coalesces one Slack run's lifecycle and final response despite an interleaved task control", async () => {
     const fixture = await seedCompany();
     const { callbacks, endpoint, runtime, service } =

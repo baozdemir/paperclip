@@ -32932,16 +32932,7 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
       stageSessionSync: boolean;
     },
   ): Promise<void> {
-    if (
-      !(await recordExactOutboundPublicationLink(tx, {
-        publication: input.publication,
-        providerMessageId: input.providerMessageId,
-      }))
-    ) {
-      throw new Error(
-        "Slack file upload message identity conflicts with another publication",
-      );
-    }
+    // Endpoint before the link's conversation lock, as in the publication commit.
     await tx
       .update(chatEndpoints)
       .set({
@@ -32955,6 +32946,16 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
           sql`coalesce((${chatEndpoints.setup}->>'runtimeGeneration')::integer, 0) = ${input.runtimeContext.generation}`,
         ),
       );
+    if (
+      !(await recordExactOutboundPublicationLink(tx, {
+        publication: input.publication,
+        providerMessageId: input.providerMessageId,
+      }))
+    ) {
+      throw new Error(
+        "Slack file upload message identity conflicts with another publication",
+      );
+    }
     if (input.stageSessionSync) {
       await stageSlackSessionSync(tx, {
         companyId: input.publication.companyId,
@@ -38132,6 +38133,22 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
                   )
                     ? null
                     : publication.commentId;
+                  // Lock the endpoint before the message link's foreign key
+                  // locks the conversation: inbound wakeup authorization takes
+                  // them in that order, and the opposite order deadlocked.
+                  await tx
+                    .update(chatEndpoints)
+                    .set({
+                      lastPublicationAt: committedAt,
+                      updatedAt: committedAt,
+                    })
+                    .where(
+                      and(
+                        eq(chatEndpoints.id, authorizationClaim.endpoint.id),
+                        inArray(chatEndpoints.status, ["verifying", "active"]),
+                        sql`coalesce((${chatEndpoints.setup}->>'runtimeGeneration')::integer, 0) = ${currentPublicationRuntimeContext.generation}`,
+                      ),
+                    );
                   const messageLinkInsert = tx.insert(chatMessageLinks).values({
                     companyId: publication.companyId,
                     endpointId: publication.endpointId,
@@ -38156,19 +38173,6 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
                   } else {
                     await messageLinkInsert.onConflictDoNothing();
                   }
-                  await tx
-                    .update(chatEndpoints)
-                    .set({
-                      lastPublicationAt: committedAt,
-                      updatedAt: committedAt,
-                    })
-                    .where(
-                      and(
-                        eq(chatEndpoints.id, authorizationClaim.endpoint.id),
-                        inArray(chatEndpoints.status, ["verifying", "active"]),
-                        sql`coalesce((${chatEndpoints.setup}->>'runtimeGeneration')::integer, 0) = ${currentPublicationRuntimeContext.generation}`,
-                      ),
-                    );
                 }
                 if (authorizationActionId) {
                   const processedAuthorization = await tx
