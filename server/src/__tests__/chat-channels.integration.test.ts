@@ -7451,6 +7451,8 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       if (String(input).endsWith("/chat.postMessage")) throw new Error("connection reset after send");
       if (String(input).endsWith("/conversations.replies")) return Response.json({ ok: true, messages: [{ ts: "7200.3", client_msg_id: uncertain.idempotencyKey, user: verifiedBotId }] });
       if (String(input).endsWith("/conversations.create")) return Response.json({ ok: true, channel: { id: "CNEWCHANNEL" } });
+      if (String(input).endsWith("/conversations.invite")) return Response.json({ ok: true, channel: { id: "CNEWCHANNEL" } });
+      if (String(input).endsWith("/bookmarks.remove")) return Response.json({ ok: true });
       return fetched(input, init);
     });
     await expect(executeConnectorTool(db, binding, "slack_post_message", uncertain)).rejects.toMatchObject({ details: { state: "uncertain" } });
@@ -7464,17 +7466,12 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       await expect(executeSlackTool(db, binding, "slack_delivery", { actionId: uncertainAction.id }, postFetch as typeof fetch)).resolves.toMatchObject({ state: "delivered", receipt: { reconciled: true } });
       expect(receiptSettled).toHaveBeenCalledTimes(1);
     } finally { unsubscribeReceipt(); }
-    await expect(executeConnectorTool(db, binding, "slack_create_channel", { name: "approval-required", is_private: true, idempotencyKey: randomUUID() })).rejects.toMatchObject({ reasonCode: expect.stringMatching(/approval/) });
-    expect(postFetch.mock.calls.some(call => String(call[0]).endsWith("/conversations.create"))).toBe(false);
-    const [approval] = await db.select().from(toolActionRequests).where(eq(toolActionRequests.companyId, fixture.companyId));
-    await db.update(heartbeatRuns).set({ status: "succeeded" }).where(eq(heartbeatRuns.id, runId));
-    const { createToolGatewayService } = await import("../services/tool-gateway.js");
-    await createToolGatewayService(db).approveActionRequest({ companyId: fixture.companyId, actionRequestId: approval.id, actor: { userId: "owner-user" } });
-    const [invocation] = await db.select().from(toolInvocations).where(eq(toolInvocations.id, approval.invocationId));
-    expect(invocation, invocation.errorMessage ?? undefined).toMatchObject({ status: "succeeded", approvalState: "approved" });
+    // Channel creation follows the company's action policy, and the bot can
+    // respond at once in a channel it created itself.
+    await expect(executeConnectorTool(db, binding, "slack_create_channel", { name: "request-date-filter", is_private: false, idempotencyKey: randomUUID() })).resolves.toMatchObject({ status: "completed" });
     expect(postFetch.mock.calls.filter(call => String(call[0]).endsWith("/conversations.create"))).toHaveLength(1);
     expect(await service.listResources(endpoint.id)).toEqual(expect.arrayContaining([
-      expect.objectContaining({ providerResourceId: "CNEWCHANNEL", enabled: false }),
+      expect.objectContaining({ providerResourceId: "CNEWCHANNEL", enabled: true }),
     ]));
     await service.handleWebhook(endpoint.publicId, "slack", new Request("https://paperclip.example/slack", {
       method: "POST", headers: { "content-type": "application/json" },
@@ -7483,7 +7480,21 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
         channel: "CNEWCHANNEL", channel_type: "C", event_ts: "7300.1",
       } }),
     }));
-    expect(await db.select().from(chatEndpointResources).where(and(eq(chatEndpointResources.endpointId, endpoint.id), eq(chatEndpointResources.providerResourceId, "CNEWCHANNEL"), eq(chatEndpointResources.enabled, true)))).toEqual([]);
+    expect(await db.select().from(chatEndpointResources).where(and(eq(chatEndpointResources.endpointId, endpoint.id), eq(chatEndpointResources.providerResourceId, "CNEWCHANNEL"), eq(chatEndpointResources.enabled, true)))).toHaveLength(1);
+    // Inviting needs no approval only in a channel this bot created.
+    await expect(executeConnectorTool(db, binding, "slack_invite", { channel: "CNEWCHANNEL", users: ["UTOOLS"], idempotencyKey: randomUUID() })).resolves.toMatchObject({ status: "completed" });
+    expect(postFetch.mock.calls.filter(call => String(call[0]).endsWith("/conversations.invite"))).toHaveLength(1);
+    await expect(executeConnectorTool(db, binding, "slack_invite", { channel: "CTOOLS", users: ["UTOOLS"], idempotencyKey: randomUUID() })).rejects.toMatchObject({ status: 403, message: expect.stringContaining("did not create needs an approved request") });
+    expect(postFetch.mock.calls.filter(call => String(call[0]).endsWith("/conversations.invite"))).toHaveLength(1);
+    await expect(executeConnectorTool(db, binding, "slack_remove_bookmark", { channel: "CTOOLS", bookmark_id: "Bk0001", idempotencyKey: randomUUID() })).rejects.toMatchObject({ reasonCode: expect.stringMatching(/approval/) });
+    expect(postFetch.mock.calls.some(call => String(call[0]).endsWith("/bookmarks.remove"))).toBe(false);
+    const [approval] = await db.select().from(toolActionRequests).where(eq(toolActionRequests.companyId, fixture.companyId));
+    await db.update(heartbeatRuns).set({ status: "succeeded" }).where(eq(heartbeatRuns.id, runId));
+    const { createToolGatewayService } = await import("../services/tool-gateway.js");
+    await createToolGatewayService(db).approveActionRequest({ companyId: fixture.companyId, actionRequestId: approval.id, actor: { userId: "owner-user" } });
+    const [invocation] = await db.select().from(toolInvocations).where(eq(toolInvocations.id, approval.invocationId));
+    expect(invocation, invocation.errorMessage ?? undefined).toMatchObject({ status: "succeeded", approvalState: "approved" });
+    expect(postFetch.mock.calls.filter(call => String(call[0]).endsWith("/bookmarks.remove"))).toHaveLength(1);
     // The governed result must return to its exact originating Slack thread,
     // even though approval delivery has a different wake key from normal input.
     const { toolActionDeliveryService } = await import("../services/tool-action-delivery.js");
@@ -7594,6 +7605,84 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
     const other = await service.create(fixture.companyId, { provider: "github", assignedAgentId: fixture.assignedAgentId });
     expect(other.requireAtMention).toBe(false);
     expect((await service.get(endpoint.id)).requireAtMention).toBe(false);
+    await service.shutdown();
+  });
+
+  it("starts a task for this or a sibling Slack bot in an allowed channel, on behalf of the linked requester", async () => {
+    const { resolveConnectorAssignments, executeConnectorTool } = await import("../services/connector-runtime.js");
+    await instanceSettingsService(db).updateExperimental({ enableChatConnectors: true });
+    vi.stubEnv("PAPERCLIP_TOOL_ACTION_SIGNING_SECRET", "slack-task-start-signing-secret");
+    onTestFinished(() => vi.unstubAllEnvs());
+    const fixture = await seedCompany();
+    const mayaFetch = fakeSlackFetch("U-MAYA-BOT");
+    const linusFetch = fakeSlackFetch("U-LINUS-BOT");
+    const providerFetch = (input: string | URL | Request, init?: RequestInit) =>
+      new Headers(init?.headers).get("authorization") === "Bearer xoxb-linus" ? linusFetch(input, init) : mayaFetch(input, init);
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = providerFetch as typeof fetch;
+    onTestFinished(() => { globalThis.fetch = originalFetch; });
+    const runtime = new FakeChatSdkRuntime();
+    const { service } = createService(runtime, providerFetch as typeof globalThis.fetch);
+    const maya = await service.create(fixture.companyId, { provider: "slack", assignedAgentId: fixture.assignedAgentId }, "owner-user");
+    const linus = await service.create(fixture.companyId, { provider: "slack", assignedAgentId: fixture.replacementAgentId }, "owner-user");
+    for (const [endpoint, botToken] of [[maya, "xoxb-maya"], [linus, "xoxb-linus"]] as const) {
+      await service.update(endpoint.id, { allowUnlinkedPeople: false, requireAtMention: false }, "owner-user");
+      await service.configure(endpoint.id, { action: "configure", credentials: { botToken, signingSecret: `signing-${botToken}` } }, "owner-user");
+      await db.update(chatEndpoints).set({ status: "active" }).where(eq(chatEndpoints.id, endpoint.id));
+    }
+    const callbacks = runtime.configurations.get(maya.id)?.callbacks;
+    if (!callbacks) throw new Error("Expected the Slack runtime");
+    const [, linusChannel] = await db.insert(chatEndpointResources).values([
+      { companyId: fixture.companyId, endpointId: maya.id, type: "channel", providerResourceId: "CFLOW", label: "flow", availability: "available", enabled: true },
+      { companyId: fixture.companyId, endpointId: linus.id, type: "channel", providerResourceId: "CFLOW", label: "flow", availability: "available", enabled: true },
+    ]).returning();
+    const [principal] = await db.insert(chatExternalPrincipals).values({ companyId: fixture.companyId, provider: "slack", providerAccountId: "T-PAPERCLIP", externalId: "UFLOW" }).returning();
+    await db.insert(chatIdentityLinks).values([maya, linus].map(endpoint => ({ companyId: fixture.companyId, endpointId: endpoint.id, principalId: principal.id, paperclipUserId: "owner-user", status: "linked" as const, confirmedAt: new Date() })));
+    const thread = makeThread({ channelId: "slack:CFLOW", id: "slack:CFLOW:8100.1", name: "flow" });
+    await deliverMessage({ callbacks, endpointId: maya.id, thread: thread.thread, message: makeMessage({ id: "8100.1", text: "@maya approve the story", mentioned: true, userId: "UFLOW" }), trigger: "mention" });
+    const [conversation] = await db.select().from(chatConversations).where(eq(chatConversations.endpointId, maya.id));
+    const [action] = await db.select().from(chatActions).where(and(eq(chatActions.endpointId, maya.id), eq(chatActions.kind, "inbound_wakeup")));
+    const runId = randomUUID();
+    await db.insert(heartbeatRuns).values({ id: runId, companyId: fixture.companyId, agentId: fixture.assignedAgentId, status: "running", invocationSource: "assignment", responsibleUserId: "owner-user", contextSnapshot: { issueId: conversation.issueId } });
+    await initializeRunIdentity(db, { companyId: fixture.companyId, runId, issueId: conversation.issueId, responsibleUserId: "owner-user", messageIds: [String(action.payload.commentId)], cause: "instruction" });
+    const binding = { companyId: fixture.companyId, agentId: fixture.assignedAgentId, runId, issueId: conversation.issueId };
+    expect((await resolveConnectorAssignments(db, binding)).map(a => a.key)).toEqual(["slack"]);
+    const taskStarts = () => db.select().from(chatActions).where(and(eq(chatActions.companyId, fixture.companyId), eq(chatActions.kind, "slash_task_start")));
+    const [source] = await db.select().from(issues).where(eq(issues.id, conversation.issueId));
+
+    // Every refusal happens before anything is queued.
+    await expect(executeConnectorTool(db, binding, "slack_start_task", { channel: "CFLOW", task: "Draft", targetEndpointId: randomUUID(), idempotencyKey: randomUUID() })).rejects.toMatchObject({ status: 403, message: expect.stringContaining("not a bot of this company") });
+    const other = await seedCompany();
+    const foreign = await service.create(other.companyId, { provider: "slack", assignedAgentId: other.assignedAgentId }, "owner-user");
+    await expect(executeConnectorTool(db, binding, "slack_start_task", { channel: "CFLOW", task: "Draft", targetEndpointId: foreign.id, idempotencyKey: randomUUID() })).rejects.toMatchObject({ status: 403, message: expect.stringContaining("not a bot of this company") });
+    await db.update(chatEndpointResources).set({ enabled: false }).where(eq(chatEndpointResources.id, linusChannel.id));
+    await expect(executeConnectorTool(db, binding, "slack_start_task", { channel: "CFLOW", task: "Draft", targetEndpointId: linus.id, idempotencyKey: randomUUID() })).rejects.toMatchObject({ status: 403, message: expect.stringContaining("cannot respond in this channel") });
+    await db.update(chatEndpointResources).set({ enabled: true }).where(eq(chatEndpointResources.id, linusChannel.id));
+    await db.update(chatIdentityLinks).set({ status: "revoked" }).where(and(eq(chatIdentityLinks.endpointId, linus.id), eq(chatIdentityLinks.principalId, principal.id)));
+    await expect(executeConnectorTool(db, binding, "slack_start_task", { channel: "CFLOW", task: "Draft", targetEndpointId: linus.id, idempotencyKey: randomUUID() })).rejects.toMatchObject({ status: 403, message: expect.stringContaining("has not linked Slack on the target bot") });
+    await db.update(chatIdentityLinks).set({ status: "linked" }).where(and(eq(chatIdentityLinks.endpointId, linus.id), eq(chatIdentityLinks.principalId, principal.id)));
+    expect(await taskStarts()).toEqual([]);
+
+    // A sibling bot opens its own thread with the stage starter and works the task as the requester's message.
+    const start = { channel: "CFLOW", task: "Draft the solution for KNS-1 and ask the developer to review it.", starter: "KNS-1 · Solution <@UDEV>", targetEndpointId: linus.id, idempotencyKey: randomUUID() };
+    await expect(executeConnectorTool(db, binding, "slack_start_task", start)).resolves.toMatchObject({ status: "completed" });
+    await executeConnectorTool(db, binding, "slack_start_task", start);
+    expect(await taskStarts()).toEqual([expect.objectContaining({ endpointId: linus.id, principalId: principal.id, status: "queued" })]);
+    await service.processPendingSlackTaskStarts();
+    await vi.waitFor(async () => expect(await service.listConversations(linus.id)).toHaveLength(1));
+    expect(runtime.endpoints.get(linus.id)?.posts).toContainEqual({ threadId: "slack:CFLOW:", text: "KNS-1 · Solution <@UDEV>" });
+    const [started] = await service.listConversations(linus.id);
+    const [issue] = await db.select().from(issues).where(eq(issues.id, started.issueId));
+    expect(issue).toMatchObject({ assigneeAgentId: fixture.replacementAgentId, createdByUserId: "owner-user" });
+    const [first] = await db.select().from(issueComments).where(eq(issueComments.issueId, started.issueId));
+    expect(first.body).toContain("Draft the solution for KNS-1 and ask the developer to review it.");
+    expect(first.body).toContain(`Started by Maya from ${source.identifier} on behalf of Owner User`);
+
+    // Without a target, the caller's own bot opens the thread with the default starter.
+    await expect(executeConnectorTool(db, binding, "slack_start_task", { channel: "CFLOW", task: "Implement ticket KNS-2", idempotencyKey: randomUUID() })).resolves.toMatchObject({ status: "completed" });
+    await service.processPendingSlackTaskStarts();
+    await vi.waitFor(async () => expect(await service.listConversations(maya.id)).toHaveLength(2));
+    expect(runtime.endpoints.get(maya.id)?.posts).toContainEqual({ threadId: "slack:CFLOW:", text: "Starting a task…" });
     await service.shutdown();
   });
 
