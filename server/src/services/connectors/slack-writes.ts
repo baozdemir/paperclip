@@ -1,14 +1,18 @@
-import { notifyChatPublicationWork } from "../chat-work-notifications.js";
+import { notifyChatActionWork, notifyChatPublicationWork } from "../chat-work-notifications.js";
 import { authorizeSlackDocument } from "./slack-document.js";
 import { slackMessage } from "./slack-message.js";
 import { createHash } from "node:crypto";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import {
+  agents,
   assets,
+  authUsers,
   chatActions,
   chatEndpoints,
   chatEndpointResources,
+  chatIdentityLinks,
   issueAttachments,
+  issues,
   toolInvocations,
   type Db,
 } from "@paperclipai/db";
@@ -97,6 +101,32 @@ export async function executeSlackWrite(
     (args.users as string[]).includes(authority.endpoint.botExternalId!)
   )
     throw forbidden("The bot cannot expand its own access");
+  if (name === "slack_invite" && invocation.approvalState !== "approved") {
+    // Free invitations are limited to a channel this bot created itself; its
+    // creation receipt is the proof (membership events rewrite resource metadata).
+    const [created] = await db
+      .select({ id: chatActions.id })
+      .from(chatActions)
+      .where(
+        and(
+          eq(chatActions.companyId, authority.endpoint.companyId),
+          eq(chatActions.endpointId, authority.endpoint.id),
+          eq(chatActions.kind, "slack_tool_write"),
+          eq(chatActions.status, "processed"),
+          sql`${chatActions.payload}->>'name' = 'slack_create_channel'`,
+          sql`${chatActions.result}->>'channel' = ${String(args.channel)}`,
+        ),
+      )
+      .limit(1);
+    if (!created)
+      throw forbidden(
+        "Inviting people to a channel this bot did not create needs an approved request",
+      );
+  }
+  const taskStart =
+    name === "slack_start_task"
+      ? await slackTaskStartTarget(db, authority, args)
+      : null;
   const hash = createHash("sha256")
     .update(JSON.stringify({ name, args }))
     .digest("hex");
@@ -295,6 +325,57 @@ export async function executeSlackWrite(
         channel_id: args.channel,
         thread_ts: args.thread_ts,
       });
+    } else if (name === "slack_start_task") {
+      // The chosen bot posts the starter and admits the task through the same
+      // durable path as its own Slack command; this run's requester stays the actor.
+      const [agent] = await db
+        .select({ name: agents.name })
+        .from(agents)
+        .where(eq(agents.id, binding.agentId));
+      const [user] = await db
+        .select({ name: authUsers.name })
+        .from(authUsers)
+        .where(eq(authUsers.id, authority.userId));
+      const [source] = await db
+        .select({ identifier: issues.identifier })
+        .from(issues)
+        .where(
+          and(
+            eq(issues.companyId, binding.companyId),
+            eq(issues.id, binding.issueId),
+          ),
+        );
+      const label = (value: string) =>
+        value.replace(/[\r\n[\]]/g, " ").trim().slice(0, 160);
+      const taskText = `[Started by ${label(agent?.name ?? "an agent")} from ${source?.identifier ?? binding.issueId} on behalf of ${label(user?.name ?? authority.userId)}]\n\n${String(args.task)}`;
+      const [queued] = await db.transaction(async (tx) => {
+        await notifyChatActionWork(tx, "slash_task_start");
+        return tx
+          .insert(chatActions)
+          .values({
+            companyId: binding.companyId,
+            endpointId: taskStart!.id,
+            principalId: authority.principalId,
+            kind: "slash_task_start",
+            providerActionId: `slack_start_task:${action.id}`,
+            payload: {
+              version: 1,
+              channelId: String(args.channel),
+              command: "slack_start_task",
+              syntheticMessageId: createHash("sha256")
+                .update(`slack_start_task:${action.id}`)
+                .digest("hex"),
+              taskText,
+              ...(args.starter ? { starterText: String(args.starter) } : {}),
+              sourceIssueId: binding.issueId,
+              sourceAgentId: binding.agentId,
+            },
+            status: "queued",
+          })
+          .onConflictDoNothing()
+          .returning({ id: chatActions.id });
+      });
+      result = { channel: String(args.channel), task_start_id: queued?.id };
     } else if (name === "slack_post_message")
       result = await api(tool.method, {
         ...parameters,
@@ -386,8 +467,8 @@ export async function executeSlackWrite(
     else if (name === "slack_create_channel") {
       result = await db.transaction(async (tx) => {
         // Membership callbacks and inbound admission use this same endpoint
-        // lock. Persist the disabled choice before either can discover the new
-        // channel: approval to create it is not approval for ongoing responses.
+        // lock. Persist the bot's own channel as enabled before either can
+        // discover it: the bot that created it responds there at once.
         await tx
           .select({ id: chatEndpoints.id })
           .from(chatEndpoints)
@@ -411,7 +492,7 @@ export async function executeSlackWrite(
             providerResourceId: channel.id,
             label: `#${String(channel.name ?? args.name)}`,
             availability: "available",
-            enabled: false,
+            enabled: true,
             metadata: {
               source: "slack_tool_create_channel",
               private: args.is_private === true,
@@ -423,7 +504,7 @@ export async function executeSlackWrite(
               chatEndpointResources.type,
               chatEndpointResources.providerResourceId,
             ],
-            set: { enabled: false, updatedAt: new Date() },
+            set: { enabled: true, updatedAt: new Date() },
           });
         return created;
       });
@@ -440,6 +521,7 @@ export async function executeSlackWrite(
       item: result.item,
       listSchema: object(result.list_metadata).schema,
       fileIds: objects(result.files).map((f) => f.id),
+      taskStartId: result.task_start_id,
       ...(name === "slack_create_list"
         ? {
             note: "List created for the bot; sharing access requires a separate approved action.",
@@ -505,4 +587,66 @@ export async function executeSlackWrite(
       };
     throw error;
   }
+}
+
+/** The bot that opens a started task: this one or a sibling in the same company and workspace,
+ * where the requester linked Slack and the bot can respond in the channel. */
+async function slackTaskStartTarget(
+  db: Db,
+  authority: Awaited<ReturnType<typeof resolveSlackTaskAuthority>>,
+  args: SlackObject,
+) {
+  const targetId =
+    typeof args.targetEndpointId === "string"
+      ? args.targetEndpointId
+      : authority.endpoint.id;
+  const [target] = await db
+    .select()
+    .from(chatEndpoints)
+    .where(
+      and(
+        eq(chatEndpoints.id, targetId),
+        eq(chatEndpoints.companyId, authority.endpoint.companyId),
+        eq(chatEndpoints.provider, "slack"),
+        eq(chatEndpoints.providerAccountId, authority.endpoint.providerAccountId!),
+        inArray(chatEndpoints.status, ["active", "verifying"]),
+      ),
+    );
+  if (!target)
+    throw forbidden(
+      "The target Slack bot is not a bot of this company in this workspace",
+    );
+  const [resource] = await db
+    .select({ id: chatEndpointResources.id })
+    .from(chatEndpointResources)
+    .where(
+      and(
+        eq(chatEndpointResources.companyId, target.companyId),
+        eq(chatEndpointResources.endpointId, target.id),
+        eq(chatEndpointResources.providerResourceId, String(args.channel)),
+        eq(chatEndpointResources.availability, "available"),
+        eq(chatEndpointResources.enabled, true),
+      ),
+    );
+  if (!resource)
+    throw forbidden(
+      "The target bot cannot respond in this channel. Invite it, or enable the channel in its connection Settings.",
+    );
+  const [link] = await db
+    .select({ id: chatIdentityLinks.id })
+    .from(chatIdentityLinks)
+    .where(
+      and(
+        eq(chatIdentityLinks.companyId, target.companyId),
+        eq(chatIdentityLinks.endpointId, target.id),
+        eq(chatIdentityLinks.principalId, authority.principalId),
+        eq(chatIdentityLinks.paperclipUserId, authority.userId),
+        eq(chatIdentityLinks.status, "linked"),
+      ),
+    );
+  if (!link)
+    throw forbidden(
+      "The requester has not linked Slack on the target bot. They link once with that bot's connect command.",
+    );
+  return target;
 }

@@ -427,7 +427,7 @@ export function createSlackTaskStartResolution(db: Db, options: ResolutionOption
 
         let starter: { id: string; threadId: string };
         try {
-          starter = await baseThread.post("Starting a task…");
+          starter = await baseThread.post(recovery.starterText ?? "Starting a task…");
         } catch (error) {
           await finalizeSlackTaskStartFailure({
             actionId: action.id,

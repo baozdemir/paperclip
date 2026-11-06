@@ -429,8 +429,8 @@ export const SLACK_TOOLS = [
     "create_channel",
     "conversations.create",
     ["channels:manage|groups:write"],
-    "approval",
-    "Create a channel after approval. It remains disabled for ongoing responses until a person enables it in Settings.",
+    "write",
+    "Create a channel. This bot can respond in it at once; invite people and other bots with slack_invite.",
     {
       name: z.string().regex(/^[a-z0-9_-]{1,80}$/),
       is_private: z.boolean(),
@@ -441,9 +441,23 @@ export const SLACK_TOOLS = [
     "invite",
     "conversations.invite",
     ["channels:manage|groups:write"],
-    "approval",
-    "Invite people to an allowed channel after approval. Cannot invite this bot or expand its own access.",
+    "write",
+    "Invite people or other bots to an allowed channel. Without an approved request this works only in a channel this bot created. Cannot invite this bot or expand its own access.",
     { channel, users: z.array(user).min(1).max(20), ...write },
+  ),
+  tool(
+    "start_task",
+    "chat.postMessage",
+    ["chat:write"],
+    "write",
+    "Start a new task in its own thread of an allowed channel, on behalf of this task's linked requester. The starter is posted as the thread's first message by this bot, or by the bot named in targetEndpointId (another Slack bot of this company); that bot then works the task text at once and continues the thread without an @mention.",
+    {
+      channel,
+      task: z.string().min(1).max(4000),
+      starter: z.string().min(1).max(300).optional(),
+      targetEndpointId: z.string().uuid().optional(),
+      ...write,
+    },
   ),
 ] as const;
 export type SlackToolName = (typeof SLACK_TOOLS)[number]["name"];

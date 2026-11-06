@@ -64,6 +64,7 @@ export type SlackSlashTaskRecoveryPayload = {
   command: string;
   syntheticMessageId: string;
   taskText: string;
+  starterText?: string;
 };
 
 export function slackSlashTaskRecoveryPayload(
@@ -85,7 +86,12 @@ export function slackSlashTaskRecoveryPayload(
   ) {
     return null;
   }
-  return { channelId, command, syntheticMessageId, taskText };
+  // A task started by a bot tool names its stage in the thread root.
+  const starterText =
+    typeof payload.starterText === "string" && payload.starterText.trim()
+      ? payload.starterText.trim().slice(0, 300)
+      : undefined;
+  return { channelId, command, syntheticMessageId, taskText, starterText };
 }
 
 export function slackTaskStarterThreadId(
@@ -957,7 +963,7 @@ export function createSlackTaskStart(db: Db, options: SlackTaskStartOptions) {
           providerPostStarted = true;
           let starter: Awaited<ReturnType<typeof baseThread.post>>;
           try {
-            starter = await baseThread.post("Starting a task…");
+            starter = await baseThread.post(recovery.starterText ?? "Starting a task…");
           } catch (error) {
             try {
               await finalizeSlackTaskStartFailure({
