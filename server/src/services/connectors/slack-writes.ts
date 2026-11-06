@@ -8,9 +8,11 @@ import {
   assets,
   authUsers,
   chatActions,
+  chatConversations,
   chatEndpoints,
   chatEndpointResources,
   chatIdentityLinks,
+  chatMessageLinks,
   issueAttachments,
   issues,
   toolInvocations,
@@ -347,7 +349,8 @@ export async function executeSlackWrite(
         );
       const label = (value: string) =>
         value.replace(/[\r\n[\]]/g, " ").trim().slice(0, 160);
-      const taskText = `[Started by ${label(agent?.name ?? "an agent")} from ${source?.identifier ?? binding.issueId} on behalf of ${label(user?.name ?? authority.userId)}]\n\n${String(args.task)}`;
+      // The task's first line becomes its title; the provenance line goes last.
+      const taskText = `${String(args.task)}\n\n[Started by ${label(agent?.name ?? "an agent")} from ${source?.identifier ?? binding.issueId} on behalf of ${label(user?.name ?? authority.userId)}]`;
       const [queued] = await db.transaction(async (tx) => {
         await notifyChatActionWork(tx, "slash_task_start");
         return tx
@@ -596,6 +599,44 @@ async function slackTaskStartTarget(
   authority: Awaited<ReturnType<typeof resolveSlackTaskAuthority>>,
   args: SlackObject,
 ) {
+  // A task that a bot started may start another one only after a person has
+  // written in its thread; bots never chain each other without a human turn.
+  if (authority.conversation) {
+    const [botStarted] = await db
+      .select({ id: chatActions.id })
+      .from(chatActions)
+      .where(
+        and(
+          eq(chatActions.companyId, authority.endpoint.companyId),
+          eq(chatActions.endpointId, authority.endpoint.id),
+          eq(chatActions.kind, "slash_task_start"),
+          sql`${chatActions.payload}->>'command' = 'slack_start_task'`,
+          sql`${chatActions.result}->>'threadId' = ${authority.conversation.externalThreadId}`,
+        ),
+      )
+      .limit(1);
+    if (botStarted) {
+      // Count across every conversation row bound to this task's thread.
+      const [inbound] = await db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(chatMessageLinks)
+        .innerJoin(
+          chatConversations,
+          eq(chatConversations.id, chatMessageLinks.conversationId),
+        )
+        .where(
+          and(
+            eq(chatMessageLinks.companyId, authority.endpoint.companyId),
+            eq(chatConversations.issueId, authority.issueId),
+            eq(chatMessageLinks.direction, "inbound"),
+          ),
+        );
+      if ((inbound?.count ?? 0) < 2)
+        throw forbidden(
+          "A task started by a bot can start another task only after a person has written in its thread",
+        );
+    }
+  }
   const targetId =
     typeof args.targetEndpointId === "string"
       ? args.targetEndpointId

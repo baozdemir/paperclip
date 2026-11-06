@@ -66,10 +66,12 @@ tool. User search credentials never authorize writes.
   lists, text records, renaming and approved channel sharing. Slack plan and
   document permissions apply. Lists need a separate approved share before others
   can use them.
-- Governed actions: deleting the bot's messages, deleting bookmarks, creating
-  channels, inviting people and granting list access require approval. New channels
-  remain disabled for ongoing responses. The bot cannot join an existing channel,
-  invite itself or enable a destination.
+- Governed actions: deleting the bot's messages, deleting bookmarks and granting
+  list access require approval. Creating channels, inviting people into a channel the
+  bot created and starting tasks (`slack_start_task`, for this bot or another Slack
+  bot of the company) follow action policies; inviting into any other channel needs
+  an approved request. The bot responds at once in a channel it created. It cannot
+  join an existing channel, invite itself or enable a destination.
 
 New manifests request collaboration scopes. Existing bots keep their current
 permissions and Settings identifies missing scopes. Add them under **OAuth &
