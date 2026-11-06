@@ -9281,11 +9281,30 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
     const [first] = await db.select().from(issueComments).where(eq(issueComments.issueId, started.issueId));
     expect(first.body).toContain("Draft the solution for KNS-1 and ask the developer to review it.");
     expect(first.body).toContain(`Started by Maya from ${source.identifier} on behalf of Owner User`);
+    expect(issue.title).toBe("Draft the solution for KNS-1 and ask the developer to review it.");
+
+    // A started task cannot start another one until a person has written in its thread.
+    const runFor = async (endpointId: string, agentId: string, issueId: string) => {
+      const wakes = await db.select().from(chatActions).where(and(eq(chatActions.endpointId, endpointId), eq(chatActions.kind, "inbound_wakeup"), sql`${chatActions.payload}->>'issueId' = ${issueId}`)).orderBy(desc(chatActions.createdAt));
+      const id = randomUUID();
+      await db.insert(heartbeatRuns).values({ id, companyId: fixture.companyId, agentId, status: "running", invocationSource: "assignment", responsibleUserId: "owner-user", contextSnapshot: { issueId } });
+      await initializeRunIdentity(db, { companyId: fixture.companyId, runId: id, issueId, responsibleUserId: "owner-user", messageIds: [String(wakes[0].payload.commentId)], cause: "instruction" });
+      const started = { companyId: fixture.companyId, agentId, runId: id, issueId };
+      expect((await resolveConnectorAssignments(db, started)).map(a => a.key)).toEqual(["slack"]);
+      return started;
+    };
+    const kickoff = await runFor(linus.id, fixture.replacementAgentId, started.issueId);
+    await expect(executeConnectorTool(db, kickoff, "slack_start_task", { channel: "CFLOW", task: "Loop back", targetEndpointId: maya.id, idempotencyKey: randomUUID() })).rejects.toMatchObject({ status: 403, message: expect.stringContaining("after a person has written") });
+    const linusCallbacks = runtime.configurations.get(linus.id)?.callbacks;
+    if (!linusCallbacks) throw new Error("Expected the sibling Slack runtime");
+    await deliverMessage({ callbacks: linusCallbacks, endpointId: linus.id, thread: makeThread({ channelId: "slack:CFLOW", id: started.externalThreadId, name: "flow" }).thread, message: makeMessage({ id: "8200.1", text: "Looks good, go on", mentioned: true, userId: "UFLOW" }), trigger: "mention" });
+    const answered = await runFor(linus.id, fixture.replacementAgentId, started.issueId);
+    await expect(executeConnectorTool(db, answered, "slack_start_task", { channel: "CFLOW", task: "Test KNS-1", targetEndpointId: maya.id, idempotencyKey: randomUUID() })).resolves.toMatchObject({ status: "completed" });
 
     // Without a target, the caller's own bot opens the thread with the default starter.
     await expect(executeConnectorTool(db, binding, "slack_start_task", { channel: "CFLOW", task: "Implement ticket KNS-2", idempotencyKey: randomUUID() })).resolves.toMatchObject({ status: "completed" });
     await service.processPendingSlackTaskStarts();
-    await vi.waitFor(async () => expect(await service.listConversations(maya.id)).toHaveLength(2));
+    await vi.waitFor(async () => expect(await service.listConversations(maya.id)).toHaveLength(3));
     expect(runtime.endpoints.get(maya.id)?.posts).toContainEqual({ threadId: "slack:CFLOW:", text: "Starting a task…" });
     await service.shutdown();
   });

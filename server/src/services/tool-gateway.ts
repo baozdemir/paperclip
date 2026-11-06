@@ -10762,7 +10762,7 @@ export function createToolGatewayService(
         });
         let accessDecision = await policyService.decide(decisionInput);
         if (accessDecision.allowed && tool.providerType === "paperclip_slack_chat" && SLACK_TOOLS.some(t => t.name === tool.upstreamToolName && t.risk === "approval")) {
-          accessDecision = { ...accessDecision, allowed: false, decision: "require_approval", reasonCode: "requires_approval_policy", explanation: "Slack destructive actions, channel creation and invitations require approval." };
+          accessDecision = { ...accessDecision, allowed: false, decision: "require_approval", reasonCode: "requires_approval_policy", explanation: "Slack destructive actions require approval." };
         }
         const recorded = await policyService.recordInvocation(
           decisionInput,
