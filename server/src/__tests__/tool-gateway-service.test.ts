@@ -235,6 +235,24 @@ describeEmbeddedPostgres("tool gateway service", () => {
     await tempDb?.cleanup();
   });
 
+  it("says on the approval preview when it shortened an argument", async () => {
+    const { company, agent, run } = await createRunFixture(db);
+    await db.insert(toolPolicies).values(reviewNotePolicyRow(company));
+    const gateway = createTestToolGatewayService(db);
+    const session = await gateway.createSession(runSessionInput(company, agent, run));
+
+    await expect(gateway.executeTool({
+      sessionToken: session.token,
+      tool: "mcp-remote-fixture:update_note",
+      parameters: { noteId: "n1", body: "x".repeat(200) },
+    })).rejects.toMatchObject({ reasonCode: "approval_required" });
+
+    const [actionRequest] = await db.select().from(toolActionRequests);
+    const preview = actionRequest.previewMarkdown ?? "";
+    expect(preview).toContain(`**Body:** ${"x".repeat(137)}…`);
+    expect(preview).toContain("… (shortened; open in Paperclip for the full details)");
+  });
+
   it("gates write tools with an action request and executes only stored reviewed arguments once", async () => {
     const { company, agent, run } = await createRunFixture(db);
     await db.insert(toolPolicies).values(reviewNotePolicyRow(company));
@@ -282,6 +300,7 @@ describeEmbeddedPostgres("tool gateway service", () => {
     expect(preview).not.toContain("\n\n");
     // The humanized field label is surfaced (body → "Body"), the raw key is not.
     expect(preview).toContain("**Body:** short");
+    expect(preview).not.toContain("shortened");
 
     const [interaction] = await db.select().from(issueThreadInteractions);
     expect(interaction).toMatchObject({

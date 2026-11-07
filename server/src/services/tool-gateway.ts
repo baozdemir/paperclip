@@ -977,18 +977,29 @@ function buildHumanizedActionPreview(input: {
     return trustLine;
 
   const fieldLines: string[] = [];
+  // An approver must see when the preview leaves something out: a value cut at
+  // 140 characters, an object or list value, or fields past the sixth.
+  let shortened = false;
   for (const [key, value] of Object.entries(
     parsed as Record<string, unknown>,
   )) {
-    if (fieldLines.length >= 6) break;
     if (isIdentifierArgumentKey(key)) continue;
     const rendered = humanizeArgumentValue(value);
-    if (rendered === null) continue;
+    if (rendered === null) {
+      if (value !== null && typeof value === "object") shortened = true;
+      continue;
+    }
+    if (fieldLines.length >= 6) {
+      shortened = true;
+      break;
+    }
+    if (typeof value === "string" && value.trim().length > 140) shortened = true;
     fieldLines.push(`**${humanizeArgumentKey(key)}:** ${rendered}`);
   }
 
-  if (fieldLines.length === 0) return trustLine;
-  return [trustLine, ...fieldLines].join(" · ");
+  const note = shortened ? ["… (shortened; open in Paperclip for the full details)"] : [];
+  if (fieldLines.length === 0 && !shortened) return trustLine;
+  return [trustLine, ...fieldLines, ...note].join(" · ");
 }
 
 const BUILTIN_TOOLS: ToolGatewayDescriptor[] = [
