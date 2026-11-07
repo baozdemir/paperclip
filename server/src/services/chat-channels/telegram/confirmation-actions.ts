@@ -143,10 +143,11 @@ export function createTelegramConfirmationActions(db: Db, options: TelegramConfi
 
     const decision = tokenPayload.decision;
     try {
-      if (event.provider === "slack" && nativeSlackToolConfirmation(interaction)) {
+      const slackToolConfirmation = event.provider === "slack" ? nativeSlackToolConfirmation(interaction) : null;
+      if (slackToolConfirmation) {
         if (!options.resolveToolAction) return deny(safelyKnown);
         await options.resolveToolAction({ companyId: issue.companyId, issueId: issue.id, interactionId: interaction.id,
-          actionRequestId: interaction.payload.toolAction!.actionRequestId,
+          actionRequestId: slackToolConfirmation.payload.toolAction!.actionRequestId,
           decision: decision === "accept" ? "approved" : "rejected", actor: { userId: principal.userId! },
           beforeResolveInTransaction: (tx) => requireCurrentExternalActionAuthorization(tx as unknown as DbTransaction, {
             conversationId: conversation.id, endpointId: record.endpoint.id, expectedUserId: principal.userId!,
@@ -503,7 +504,7 @@ export function createTelegramConfirmationActions(db: Db, options: TelegramConfi
     }
     const resolvedByUserId = interaction.resolvedByUserId;
     const shouldWake =
-      !interaction.payload.toolAction &&
+      !(interaction.kind === "request_confirmation" && interaction.payload.toolAction) &&
       Boolean(issue.assigneeAgentId) &&
       issue.status !== "done" &&
       issue.status !== "cancelled" &&
