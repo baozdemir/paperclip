@@ -38,6 +38,7 @@ import {
 } from "./slack-client.js";
 import { logActivity } from "../activity-log.js";
 
+const SLACK_TASK_START_LIMIT = 6;
 const richText = (text: unknown) => [
   {
     type: "rich_text",
@@ -352,6 +353,23 @@ export async function executeSlackWrite(
       // The task's first line becomes its title; the provenance line goes last.
       const taskText = `${String(args.task)}\n\n[Started by ${label(agent?.name ?? "an agent")} from ${source?.identifier ?? binding.issueId} on behalf of ${label(user?.name ?? authority.userId)}]`;
       const [queued] = await db.transaction(async (tx) => {
+        // Bound how many tasks one task can start. Replays of a started key
+        // return above and never reach this count; the lock orders concurrent starts.
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`slack_start_task:${binding.issueId}`}, 0))`);
+        const [started] = await tx
+          .select({ count: sql<number>`count(*)::int` })
+          .from(chatActions)
+          .where(
+            and(
+              eq(chatActions.companyId, binding.companyId),
+              eq(chatActions.kind, "slash_task_start"),
+              sql`${chatActions.payload}->>'sourceIssueId' = ${binding.issueId}`,
+            ),
+          );
+        if ((started?.count ?? 0) >= SLACK_TASK_START_LIMIT)
+          throw forbidden(
+            `A task can start at most ${SLACK_TASK_START_LIMIT} tasks with slack_start_task. Ask a person to start any further ones in Slack.`,
+          );
         await notifyChatActionWork(tx, "slash_task_start");
         return tx
           .insert(chatActions)
