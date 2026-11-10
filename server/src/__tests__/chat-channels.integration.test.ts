@@ -9308,11 +9308,11 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
     await vi.waitFor(async () => expect(await service.listConversations(maya.id)).toHaveLength(3));
     expect(runtime.endpoints.get(maya.id)?.posts).toContainEqual({ threadId: "slack:CFLOW:", text: "Starting a task…" });
 
-    // One task starts at most six tasks; a replay of an earlier start still answers.
-    for (let n = 3; n <= 6; n++) await expect(executeConnectorTool(db, binding, "slack_start_task", { channel: "CFLOW", task: `Implement ticket ${n}`, idempotencyKey: randomUUID() })).resolves.toMatchObject({ status: "completed" });
-    await expect(executeConnectorTool(db, binding, "slack_start_task", { channel: "CFLOW", task: "Implement ticket 7", idempotencyKey: randomUUID() })).rejects.toMatchObject({ status: 403, message: expect.stringContaining("at most 6") });
+    // One task starts at most twenty tasks; a replay of an earlier start still answers.
+    for (let n = 3; n <= 20; n++) await expect(executeConnectorTool(db, binding, "slack_start_task", { channel: "CFLOW", task: `Implement ticket ${n}`, idempotencyKey: randomUUID() })).resolves.toMatchObject({ status: "completed" });
+    await expect(executeConnectorTool(db, binding, "slack_start_task", { channel: "CFLOW", task: "Implement ticket 21", idempotencyKey: randomUUID() })).rejects.toMatchObject({ status: 403, message: expect.stringContaining("at most 20") });
     await expect(executeConnectorTool(db, binding, "slack_start_task", start)).resolves.toMatchObject({ status: "replayed" });
-    expect((await taskStarts()).filter(task => task.payload.sourceIssueId === binding.issueId)).toHaveLength(6);
+    expect((await taskStarts()).filter(task => task.payload.sourceIssueId === binding.issueId)).toHaveLength(20);
     await service.shutdown();
   });
 

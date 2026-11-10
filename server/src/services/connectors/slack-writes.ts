@@ -38,7 +38,8 @@ import {
 } from "./slack-client.js";
 import { logActivity } from "../activity-log.js";
 
-const SLACK_TASK_START_LIMIT = 6;
+// Bounds a run that loops the tool; a request flow starts one thread per ticket and per bug, so keep room for those.
+const SLACK_TASK_START_LIMIT = 20;
 const richText = (text: unknown) => [
   {
     type: "rich_text",
