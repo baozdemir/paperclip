@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { createHash, createHmac } from "node:crypto";
 import { executionReceipt, executionReview, executionReviewPreview, executionReviewSections, requiresIndividualExecutionReview } from "./execution-review.js";
+import { projectSafeChatPublicationText } from "./chat-publication-projection.js";
+
+/** Review arguments whose command starts at a known offset of the preview. */
+function reviewArgs(command: (start: number) => string) {
+  const args = { server: "test-prod", target_revision: "rev", request_id: "id", reason: "review", command: "" };
+  args.command = command(JSON.stringify(args, null, 2).indexOf('"command": "') + 12);
+  return args;
+}
 
 describe("execution review configuration and receipts", () => {
   const settings = { tools: ["run"], approverRoles: ["owner", "admin"], nativeSlack: true, receiptTools: ["run", "run_nonprod"] };
@@ -38,6 +46,17 @@ describe("execution review configuration and receipts", () => {
     expect(sections.every(section => section.length <= 2012)).toBe(true);
     expect(sections.join("")).not.toContain("<analysis>");
     expect(JSON.parse(sections.map(section => section.slice(8, -4)).join(""))).toEqual(args);
+  });
+  it("keeps every section exact when a 2000-character boundary lands on a space", () => {
+    const preview = executionReviewPreview(reviewArgs(start => `${"x".repeat(1999 - start)} systemctl restart app`))!;
+    expect(preview[1999]).toBe(" ");
+    const sections = executionReviewSections(preview);
+    for (const section of sections) expect(projectSafeChatPublicationText(section)).toBe(section);
+    expect(sections.map(section => section.slice(8, -4)).join("")).toBe(preview);
+  });
+  it("offers no native review when a section cannot be shown exactly", () => {
+    // The second section would begin with "debug …", a line the chat projection drops as log output.
+    expect(executionReviewPreview(reviewArgs(start => `${"x".repeat(2000 - start)}debug mode on`))).toBeNull();
   });
   it("does not permit native approval of a redacted or unbounded review", () => {
     const args = { server: "s", target_revision: "r", request_id: "i", reason: "r", command: "password=private-canary" };

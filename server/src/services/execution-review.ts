@@ -90,8 +90,10 @@ export function executionReceipt(input: {
 export function executionReviewPreview(parameters: Record<string, unknown>, mode: "server" | "arguments" = "server"): string | null {
   if (mode === "server" && !["server", "command", "reason", "target_revision", "request_id"].every(key => typeof parameters[key] === "string")) return null;
   const text = JSON.stringify(parameters, null, 2).replace(/[<>&`]/g, char => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`);
-  // Never offer a native approval of redacted or incomplete command text.
-  if (text.length > 90_000 || projectSafeChatPublicationText(text) !== text) return null;
+  // Never offer a native approval of redacted or incomplete command text. The
+  // card re-checks every section strictly; one it would change means panel-only review.
+  if (text.length > 90_000 || projectSafeChatPublicationText(text) !== text
+    || executionReviewSections(text).some(section => projectSafeChatPublicationText(section) !== section)) return null;
   return text;
 }
 
@@ -100,8 +102,11 @@ export function executionReviewSections(text: string): string[] {
   let chunk = "";
   for (const point of text) {
     if (chunk.length + point.length > 2000) {
-      sections.push("```json\n" + chunk + "\n```");
-      chunk = "";
+      // The chat projection strips whitespace before a line break, so a
+      // section never ends on whitespace: the trailing run starts the next one.
+      const kept = chunk.trimEnd() || chunk;
+      sections.push("```json\n" + kept + "\n```");
+      chunk = chunk.slice(kept.length);
     }
     chunk += point;
   }
