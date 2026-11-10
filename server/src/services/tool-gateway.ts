@@ -942,10 +942,15 @@ function isIdentifierArgumentKey(key: string): boolean {
 /** Render a single argument value as short, plain text — or null if it shouldn't be shown. */
 function humanizeArgumentValue(value: unknown): string | null {
   if (typeof value === "string") {
-    const trimmed = value.trim();
+    // One line, with &, < and > escaped: argument text must not add lines,
+    // links or mentions to the approval card (Slack reads <…> as markup).
+    const trimmed = value.replace(/\s+/g, " ").trim();
     if (!trimmed) return null;
     if (trimmed === REDACTED_ARGUMENT_SENTINEL) return "hidden for privacy";
-    return trimmed.length > 140 ? `${trimmed.slice(0, 137)}…` : trimmed;
+    return (trimmed.length > 140 ? `${trimmed.slice(0, 137)}…` : trimmed)
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;");
   }
   if (typeof value === "number" || typeof value === "boolean")
     return String(value);

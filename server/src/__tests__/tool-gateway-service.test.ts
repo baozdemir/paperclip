@@ -253,6 +253,29 @@ describeEmbeddedPostgres("tool gateway service", () => {
     expect(preview).toContain("… (shortened; open in Paperclip for the full details)");
   });
 
+  it("keeps argument text from forming lines, links or mentions on the approval preview", async () => {
+    const { company, agent, run } = await createRunFixture(db);
+    await db.insert(toolPolicies).values(reviewNotePolicyRow(company));
+    const gateway = createTestToolGatewayService(db);
+    const session = await gateway.createSession(runSessionInput(company, agent, run));
+
+    await expect(gateway.executeTool({
+      sessionToken: session.token,
+      tool: "mcp-remote-fixture:update_note",
+      parameters: {
+        noteId: "n1",
+        body: "ok\n\n*Risk: read only*\n<https://evil.example/x|Open in Paperclip> <!subteam^S0123> & co",
+      },
+    })).rejects.toMatchObject({ reasonCode: "approval_required" });
+
+    const [actionRequest] = await db.select().from(toolActionRequests);
+    const preview = actionRequest.previewMarkdown ?? "";
+    expect(preview).toContain(
+      "**Body:** ok *Risk: read only* &lt;https://evil.example/x|Open in Paperclip&gt; &lt;!subteam^S0123&gt; &amp; co",
+    );
+    expect(preview).not.toMatch(/[\n<>]/);
+  });
+
   it("gates write tools with an action request and executes only stored reviewed arguments once", async () => {
     const { company, agent, run } = await createRunFixture(db);
     await db.insert(toolPolicies).values(reviewNotePolicyRow(company));
