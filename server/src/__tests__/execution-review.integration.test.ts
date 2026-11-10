@@ -99,6 +99,24 @@ suite("mandatory production execution review", () => {
     }
   });
 
+  it("rejects an invalid execution review setting before it is stored", async () => {
+    const f = await fixture(db);
+    const app = express(); app.use(express.json());
+    app.use((req, _res, next) => { req.actor = { type: "board", source: "session", userId: "owner-user",
+      companyIds: [f.company.id], memberships: [{ companyId: f.company.id, status: "active", membershipRole: "owner" }] } as never; next(); });
+    app.use("/api", toolAccessRoutes(db)); app.use(errorHandler);
+    const invalid = { ...f.connection.config, executionReview: { ...f.connection.config.executionReview as object, approverRoles: ["developer"] } };
+    await request(app).patch(`/api/tool-connections/${f.connection.id}`).send({ config: invalid }).expect(422);
+    for (const field of ["config", "transportConfig"]) {
+      await request(app).post(`/api/companies/${f.company.id}/tools/connections`).send({
+        applicationId: f.connection.applicationId, name: `Invalid ${randomUUID()}`, transport: "mcp_remote", [field]: invalid,
+      }).expect(422);
+    }
+    // The connection keeps its valid setting, so it stays usable and repairable.
+    const saved = await db.select().from(toolConnections).where(eq(toolConnections.companyId, f.company.id));
+    expect(saved.map(connection => connection.config.executionReview)).toEqual([f.connection.config.executionReview]);
+  });
+
   it.each(["owner", "admin"])("keeps pipeline log reads free and requires %s for each run despite broad allow", async role => {
     const f = await fixture(db);
     await db.update(toolConnections).set({ config: { ...f.connection.config, executionReview: {

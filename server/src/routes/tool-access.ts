@@ -3,7 +3,7 @@ import { aiConnectionRouterPluginKey } from "@paperclipai/shared";
 import { aiConnectionRouterService } from "../services/ai-connection-router.js";
 import { composioAppSetupSchema, composioAppsRefreshSchema, composioAppsSyncSchema, composioAppAccountSchema } from "@paperclipai/shared";
 import { aggregatorAppsSyncSchema, aggregatorAppsRefreshSchema, arcadeDiscoverySetupSchema } from "@paperclipai/shared/aggregator-apps";
-import { canManageExecutionReview, connectionExecutionReview } from "../services/execution-review.js";
+import { canManageExecutionReview, connectionExecutionReview, executionReview } from "../services/execution-review.js";
 import { Router, type Request, type Response } from "express";
 import type { Db } from "@paperclipai/db";
 import { agents, companies, connectionGrants, issueThreadInteractions, toolConnectionInstalls } from "@paperclipai/db";
@@ -1683,6 +1683,9 @@ function connectorEnrollmentPrincipal(req: Request): string {
       !(await canManageExecutionReview(db, companyId, req.actor.userId))) {
       throw forbidden("Only active company owners and administrators can configure production execution review");
     }
+    // A stored invalid setting fails every later decision and route on the connection (422 here instead).
+    executionReview(req.body.config);
+    executionReview(req.body.transportConfig);
     try {
       const connection = await svc.createConnection(companyId, req.body, getActorInfo(req));
       await logActivity(db, {
@@ -2162,6 +2165,9 @@ function connectorEnrollmentPrincipal(req: Request): string {
       !(await canManageExecutionReview(db, existing.companyId, req.actor.userId))) {
       throw forbidden("Only active company owners and administrators can configure production execution review");
     }
+    // A stored invalid setting fails every later decision and route on the connection (422 here instead).
+    executionReview(req.body.config);
+    executionReview(req.body.transportConfig);
     const connection = await svc.updateConnection(existing.id, req.body);
     const lifecycleChanges = classifyConnectionUpdate(
       { enabled: existing.enabled, config: existing.config },
