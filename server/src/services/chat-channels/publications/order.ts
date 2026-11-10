@@ -35,10 +35,12 @@ function publicationPrecedes(
 }
 
 // An unsent or unconfirmed publication holds every later one in its
-// conversation. An unconfirmed run progress indicator is the exception: it
-// carries no answer and is never replayed, so it must not hold the replies.
+// conversation. An unconfirmed progress indicator is the exception: a run's
+// indicator (no comment) or an inbound "queued" notice (a wake key) carries no
+// answer and is never replayed, so it must not hold the replies.
 function holdsLaterPublications(table: {
   commentId: AnyPgColumn;
+  idempotencyKey: AnyPgColumn;
   payload: AnyPgColumn;
   state: AnyPgColumn;
 }) {
@@ -46,7 +48,7 @@ function holdsLaterPublications(table: {
     inArray(table.state, ["pending", "retry", "streaming"]),
     and(
       eq(table.state, "delivery_unknown"),
-      sql`not (${table.commentId} is null and coalesce(${table.payload}->>'progressState', '') in ('queued', 'working'))`,
+      sql`not (coalesce(${table.payload}->>'progressState', '') in ('queued', 'working') and (${table.commentId} is null or ${table.idempotencyKey} like 'wake:%:queued:%'))`,
     ),
   );
 }

@@ -18,6 +18,7 @@ import { fastResponseReceipt } from "../services/fast-response-provider.js";
 import { fastResponseRequests } from "@paperclipai/db";
 import { toolAccessService } from "../services/tool-access.js";
 import { executionReviewFixture } from "./helpers/execution-review-fixture.js";
+import { inboundWakePublicationKey } from "../services/chat-inbound-wakeup-publications.js";
 import { toolActionRequests, toolInvocations, toolPolicies } from "@paperclipai/db";
 import { GitHubPublicationLeaseLost, withGitHubPublicationLease } from "../services/chat-github-publication-lease.js";
 import { secretService } from "../services/secrets.js";
@@ -33779,6 +33780,53 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       ]);
       // The indicator itself stays unconfirmed and is never replayed implicitly.
       expect(await unknown()).toMatchObject({ state: "delivery_unknown" });
+    });
+
+    it("does not hold the final reply behind an unconfirmed queued notice", async () => {
+      const f = await unconfirmedWorkingFixture();
+      // An inbound "queued" notice carries the follow-up's comment and a wake key.
+      const [followUp] = await db
+        .select()
+        .from(issueComments)
+        .where(eq(issueComments.issueId, f.conversation.issueId));
+      const [queued] = await db
+        .insert(chatPublications)
+        .values({
+          companyId: f.fixture.companyId,
+          endpointId: f.conversation.endpointId,
+          conversationId: f.conversation.id,
+          issueId: f.conversation.issueId,
+          commentId: followUp.id,
+          idempotencyKey: inboundWakePublicationKey(
+            randomUUID(),
+            "queued",
+            f.conversation.endpointId,
+            f.conversation.id,
+          ),
+          payload: { text: "Your follow-up is queued.", progressState: "queued" },
+          state: "delivery_unknown",
+        })
+        .returning();
+
+      const comment = await addSelectedChatFinal({
+        agentId: f.fixture.assignedAgentId,
+        body: "Opened the Jira task.",
+        companyId: f.fixture.companyId,
+        issueId: f.conversation.issueId,
+        runId: f.runId,
+      });
+      await f.service.processPendingPublications();
+
+      const [reply] = await db
+        .select()
+        .from(chatPublications)
+        .where(eq(chatPublications.commentId, comment.id));
+      expect(reply).toMatchObject({ state: "published" });
+      const [notice] = await db
+        .select()
+        .from(chatPublications)
+        .where(eq(chatPublications.id, queued.id));
+      expect(notice).toMatchObject({ state: "delivery_unknown" });
     });
 
     it("logs the provider error behind an unconfirmed publication", async () => {
