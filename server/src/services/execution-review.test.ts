@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createHash, createHmac } from "node:crypto";
-import { executionReceipt, executionReview, executionReviewPreview, executionReviewSections, requiresIndividualExecutionReview } from "./execution-review.js";
+import { executionReceipt, executionReceiptKey, executionReview, executionReviewPreview, executionReviewSections, requiresIndividualExecutionReview } from "./execution-review.js";
 import { projectSafeChatPublicationText } from "./chat-publication-projection.js";
 import { requestConfirmationPayloadSchema } from "@paperclipai/shared";
 
@@ -27,7 +27,11 @@ describe("execution review configuration and receipts", () => {
       agentId: "33333333-3333-4333-8333-333333333333", issueId: "44444444-4444-4444-8444-444444444444", tool: "run",
       arguments: args, approved: true, actionRequestId: "55555555-5555-4555-8555-555555555555" }, signingKey, 1790000000);
     const [body, signature] = token.split(".");
-    expect(signature).toBe(createHmac("sha256", signingKey).update("paperclip.execution-receipt.v1:" + body!).digest("hex"));
+    // The standalone service holds only the derived receipt key, never the instance secret.
+    const receiptKey = createHmac("sha256", signingKey).update("paperclip.execution-receipt-key.v1").digest("hex");
+    expect(executionReceiptKey(signingKey)).toBe(receiptKey);
+    expect(signature).toBe(createHmac("sha256", receiptKey).update("paperclip.execution-receipt.v1:" + body!).digest("hex"));
+    expect(signature).not.toBe(createHmac("sha256", signingKey).update("paperclip.execution-receipt.v1:" + body!).digest("hex"));
     const payload = JSON.parse(Buffer.from(body!, "base64url").toString());
     const sorted = JSON.stringify({ command: args.command, reason: args.reason, server: args.server, target_revision: args.target_revision });
     expect(payload.argumentsHash).toBe(createHash("sha256").update(sorted).digest("hex"));

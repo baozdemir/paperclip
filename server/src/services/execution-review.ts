@@ -80,6 +80,12 @@ function canonical(value: unknown): string {
   return `{${Object.keys(value as Record<string, unknown>).sort().map(key => `${JSON.stringify(key)}:${canonical((value as Record<string, unknown>)[key])}`).join(",")}}`;
 }
 
+/** The key receipts are signed with: derived from the instance secret, so the service that verifies receipts never
+ * holds the instance-wide secret itself (it gets this hex string as its signing key). */
+export function executionReceiptKey(signingSecret: string): string {
+  return createHmac("sha256", signingSecret).update("paperclip.execution-receipt-key.v1").digest("hex");
+}
+
 export function executionReceipt(input: {
   invocationId: string; companyId: string; connectionId: string; agentId: string; issueId: string; tool: string;
   arguments: unknown; approved: boolean; actionRequestId: string | null;
@@ -87,7 +93,7 @@ export function executionReceipt(input: {
   if (signingSecret.length < 32) throw forbidden("Execution receipts require a private control-plane signing secret");
   const { arguments: args, ...context } = input;
   const body = Buffer.from(canonical({ ...context, argumentsHash: createHash("sha256").update(canonical(args)).digest("hex"), issuedAt })).toString("base64url");
-  return `${body}.${createHmac("sha256", signingSecret).update("paperclip.execution-receipt.v1:" + body).digest("hex")}`;
+  return `${body}.${createHmac("sha256", executionReceiptKey(signingSecret)).update("paperclip.execution-receipt.v1:" + body).digest("hex")}`;
 }
 
 /** Exact JSON review; escape markup so Slack cannot hide command text or emit mentions. */
