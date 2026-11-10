@@ -1,8 +1,12 @@
 import { createHash, createHmac } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { companyMemberships, toolConnections, type Db } from "@paperclipai/db";
+import { requestConfirmationPayloadSchema } from "@paperclipai/shared";
 import { projectSafeChatPublicationText } from "./chat-publication-projection.js";
 import { forbidden, unprocessable } from "../errors.js";
+
+// The approval interaction rejects a longer preview; above it the review is panel-only.
+const MAX_PREVIEW_LENGTH = requestConfirmationPayloadSchema.shape.toolAction.unwrap().shape.previewMarkdown.maxLength ?? 0;
 
 export type ExecutionReview = {
   tools: string[];
@@ -92,7 +96,7 @@ export function executionReviewPreview(parameters: Record<string, unknown>, mode
   const text = JSON.stringify(parameters, null, 2).replace(/[<>&`]/g, char => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`);
   // Never offer a native approval of redacted or incomplete command text. The
   // card re-checks every section strictly; one it would change means panel-only review.
-  if (text.length > 90_000 || projectSafeChatPublicationText(text) !== text
+  if (text.length > MAX_PREVIEW_LENGTH || projectSafeChatPublicationText(text) !== text
     || executionReviewSections(text).some(section => projectSafeChatPublicationText(section) !== section)) return null;
   return text;
 }

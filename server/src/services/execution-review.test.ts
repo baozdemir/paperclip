@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createHash, createHmac } from "node:crypto";
 import { executionReceipt, executionReview, executionReviewPreview, executionReviewSections, requiresIndividualExecutionReview } from "./execution-review.js";
 import { projectSafeChatPublicationText } from "./chat-publication-projection.js";
+import { requestConfirmationPayloadSchema } from "@paperclipai/shared";
 
 /** Review arguments whose command starts at a known offset of the preview. */
 function reviewArgs(command: (start: number) => string) {
@@ -57,6 +58,11 @@ describe("execution review configuration and receipts", () => {
   it("offers no native review when a section cannot be shown exactly", () => {
     // The second section would begin with "debug …", a line the chat projection drops as log output.
     expect(executionReviewPreview(reviewArgs(start => `${"x".repeat(2000 - start)}debug mode on`))).toBeNull();
+  });
+  it("offers no exact review that the approval payload would reject", () => {
+    const payloadPreview = requestConfirmationPayloadSchema.shape.toolAction.unwrap().shape.previewMarkdown;
+    expect(payloadPreview.safeParse(executionReviewPreview(reviewArgs(() => "x".repeat(19_000)))).success).toBe(true);
+    expect(executionReviewPreview(reviewArgs(() => "x".repeat(25_000)))).toBeNull();
   });
   it("does not permit native approval of a redacted or unbounded review", () => {
     const args = { server: "s", target_revision: "r", request_id: "i", reason: "r", command: "password=private-canary" };
