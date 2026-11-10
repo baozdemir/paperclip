@@ -351,8 +351,11 @@ export async function executeSlackWrite(
         );
       const label = (value: string) =>
         value.replace(/[\r\n[\]]/g, " ").trim().slice(0, 160);
-      // The task's first line becomes its title; the provenance line goes last.
-      const taskText = `${String(args.task)}\n\n[Started by ${label(agent?.name ?? "an agent")} from ${source?.identifier ?? binding.issueId} on behalf of ${label(user?.name ?? authority.userId)}]`;
+      // The task's first line becomes its title; the provenance line goes last. The task runs as the requester's
+      // message, so the line says plainly that the agent, not the requester, wrote the text.
+      const starter = label(agent?.name ?? "an agent");
+      const requester = label(user?.name ?? authority.userId);
+      const taskText = `${String(args.task)}\n\n[Started by ${starter} from ${source?.identifier ?? binding.issueId} on behalf of ${requester}. ${starter} wrote this text, not ${requester}.]`;
       const [queued] = await db.transaction(async (tx) => {
         // Bound how many tasks one task can start. Replays of a started key
         // return above and never reach this count; the lock orders concurrent starts.

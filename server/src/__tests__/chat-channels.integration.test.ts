@@ -9281,7 +9281,8 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
     expect(issue).toMatchObject({ assigneeAgentId: fixture.replacementAgentId, createdByUserId: "owner-user" });
     const [first] = await db.select().from(issueComments).where(eq(issueComments.issueId, started.issueId));
     expect(first.body).toContain("Draft the solution for KNS-1 and ask the developer to review it.");
-    expect(first.body).toContain(`Started by Maya from ${source.identifier} on behalf of Owner User`);
+    // The requester did not write the brief: the receiving agent must not take it as their words.
+    expect(first.body).toContain(`Started by Maya from ${source.identifier} on behalf of Owner User. Maya wrote this text, not Owner User.]`);
     expect(issue.title).toBe("Draft the solution for KNS-1 and ask the developer to review it.");
 
     // A started task cannot start another one until a person has written in its thread.
