@@ -44,6 +44,7 @@ export type ResolveToolAction = (input: {
   companyId: string; issueId: string; interactionId: string; actionRequestId: string;
   decision: "approved" | "rejected"; actor: { userId: string };
   beforeResolveInTransaction: (tx: Db) => Promise<void>;
+  deferExecution?: (run: () => Promise<void>) => void;
 }) => Promise<unknown>;
 type TelegramConfirmationInput = {
   record: EndpointRecord;
@@ -152,6 +153,8 @@ export function createTelegramConfirmationActions(db: Db, options: TelegramConfi
           beforeResolveInTransaction: (tx) => requireCurrentExternalActionAuthorization(tx as unknown as DbTransaction, {
             conversationId: conversation.id, endpointId: record.endpoint.id, expectedUserId: principal.userId!,
             principalId: principal.principal.id, runtimeContext }),
+          // The ingress answers Slack within 2.5 s: the approved call runs after the committed decision (CH-6).
+          deferExecution: (run) => scheduleMessageProcessing(run),
         });
         const resolved = (await issueThreadInteractionService(db).listForIssue(issue.id)).find(row => row.id === interaction.id);
         if (!resolved || !["accepted", "rejected"].includes(resolved.status)) return deny(safelyKnown);

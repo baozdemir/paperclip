@@ -9,7 +9,8 @@ import { secretService } from "../../services/secrets.js";
 
 const bearer = "test-only-bearer-value-never-a-real-credential";
 
-export async function executionReviewFixture(db: Db, context?: { companyId: string; agentId: string; issueId: string; runId: string }) {
+export async function executionReviewFixture(db: Db, context?: { companyId: string; agentId: string; issueId: string; runId: string },
+  hooks: { beforeSend?: () => Promise<void> } = {}) {
   const company = context ? (await db.select().from(companies).where(eq(companies.id, context.companyId)))[0] :
     (await db.insert(companies).values({ name: "Execution review test", issuePrefix: `ER${randomUUID().slice(0, 5)}` }).returning())[0];
   const agent = context ? (await db.select().from(agents).where(eq(agents.id, context.agentId)))[0] :
@@ -38,6 +39,7 @@ export async function executionReviewFixture(db: Db, context?: { companyId: stri
   for (const role of ["owner", "admin", "operator", "viewer"]) await db.insert(companyMemberships).values({ companyId: company!.id, principalType: "user", principalId: `${role}-user`, status: "active", membershipRole: role }).onConflictDoNothing();
   const sends: Array<{ tool: string; receipt: Record<string, unknown>; args: unknown }> = [];
   const gateway = createToolGatewayService(db, { toolActionSigningSecret: "test-only-control-plane-signing-secret-value", remoteHttpRequest: async (_url, init) => {
+    await hooks.beforeSend?.();
     const body = JSON.parse(String(init.body));
     const token = new Headers(init.headers).get("x-paperclip-execution-receipt");
     if (!token) throw new Error("Missing execution receipt");

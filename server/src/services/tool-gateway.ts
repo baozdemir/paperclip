@@ -9823,6 +9823,9 @@ export function createToolGatewayService(
       interactionId?: string;
       actionRequestId: string;
       actor: { agentId?: string | null; userId?: string | null };
+      // Runs the approved call after the decision is committed instead of awaiting it: a Slack button must be
+      // answered within 3 s. The approval is durable either way; sweepActionReviews runs it if this never does.
+      deferExecution?: (run: () => Promise<void>) => void;
     }) {
       if (input.actor.agentId)
         throw new ToolGatewayHttpError(
@@ -9974,6 +9977,10 @@ export function createToolGatewayService(
           !isTestOriginInvocation(invocation) &&
           signedPayload.executionOnApprove === true
         ) {
+          if (input.deferExecution) {
+            input.deferExecution(() => executeApprovedAgentInvocation({ actionRequest, invocation }).then(() => undefined, () => undefined));
+            return actionRequestResolution(actionRequest);
+          }
           try {
             await executeApprovedAgentInvocation({ actionRequest, invocation });
           } catch {
@@ -10075,6 +10082,10 @@ export function createToolGatewayService(
           updated.id,
         );
       } else if (signedPayload.executionOnApprove === true) {
+        if (input.deferExecution) {
+          input.deferExecution(() => executeApprovedAgentInvocation({ actionRequest: updated, invocation }).then(() => undefined, () => undefined));
+          return actionRequestResolution(updated);
+        }
         try {
           await executeApprovedAgentInvocation({
             actionRequest: updated,

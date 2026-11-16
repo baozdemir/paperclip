@@ -44809,6 +44809,71 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
     expect(await db.select().from(chatActions).where(and(eq(chatActions.endpointId, endpoint.id), eq(chatActions.kind, "interaction_wakeup")))).toHaveLength(0);
   });
 
+  // Slack waits 3 s for a button answer and the webhook ingress 2.5 s for its callbacks: an approved call that takes
+  // longer (a provider MCP waking up) must not hold the answer, or Slack shows a 503 on a working approval.
+  it.each([{ deferred: "run in the background" }, { deferred: "dropped by a stopping process" }])("answers a native Slack tool approval before a slow approved call finishes ($deferred)", async ({ deferred }) => {
+    const fixture = await seedCompany();
+    let execution: Awaited<ReturnType<typeof executionReviewFixture>>;
+    let release!: () => void;
+    const slowProvider = new Promise<void>((resolve) => { release = resolve; });
+    let dropDeferred = false;
+    const { callbacks, endpoint, service } = await configuredSlackEndpoint(fixture, {
+      allowUnlinkedPeople: false, linkedBoardUser: true,
+      scheduleDeferredWork: (run: () => void) => { if (!dropDeferred) setImmediate(run); },
+      resolveToolAction: async input => {
+        const operation = input.decision === "approved" ? execution.gateway.approveActionRequest : execution.gateway.declineActionRequest;
+        return operation({ companyId: input.companyId, issueId: input.issueId, interactionId: input.interactionId, actionRequestId: input.actionRequestId,
+          actor: input.actor, beforeResolveInTransaction: input.beforeResolveInTransaction, deferExecution: input.deferExecution });
+      },
+    });
+    if (!callbacks.onAction) throw new Error("Slack action callback missing");
+    const channel = makeThread({ channelId: "C-OPS-SLOW", id: "slack:C-OPS-SLOW:8200.1", name: "ops-slow" });
+    await deliverMessage({ callbacks, endpointId: endpoint.id, thread: channel.thread,
+      message: makeMessage({ id: "8200.1", text: "@maya run the slow production check", mentioned: true, userId: "UBOARD" }), trigger: "mention" });
+    await qualifySetupRoundTrip(service, endpoint.id, "UBOARD");
+    await service.test(endpoint.id, "owner-user");
+    const [conversation] = await service.listConversations(endpoint.id);
+    if (!conversation) throw new Error("Slack conversation missing");
+    const runId = randomUUID();
+    await db.insert(heartbeatRuns).values({ id: runId, companyId: fixture.companyId, agentId: fixture.assignedAgentId,
+      status: "running", invocationSource: "assignment", responsibleUserId: "owner-user",
+      contextSnapshot: { issueId: conversation.issueId, source: "chat:slack", endpointId: endpoint.id } });
+    await initializeRunIdentity(db, { companyId: fixture.companyId, runId, issueId: conversation.issueId, responsibleUserId: "owner-user", cause: "instruction" });
+    execution = await executionReviewFixture(db, { companyId: fixture.companyId, agentId: fixture.assignedAgentId, issueId: conversation.issueId, runId },
+      { beforeSend: () => slowProvider });
+    await expect(execution.gateway.executeTool({ sessionToken: execution.session.token, tool: execution.prod.name, parameters: execution.parameters })).rejects.toMatchObject({ reasonCode: "approval_required" });
+    await service.processPendingPublications();
+    const [request] = await db.select().from(toolActionRequests).where(eq(toolActionRequests.companyId, fixture.companyId));
+    const interaction = (await issueThreadInteractionService(db).listForIssue(conversation.issueId)).find(row => row.payload.toolAction?.actionRequestId === request.id);
+    if (!interaction) throw new Error("Tool interaction missing");
+    const [publication] = await db.select().from(chatPublications).where(eq(chatPublications.idempotencyKey, `interaction:${interaction.id}:${endpoint.id}`));
+    const [accept] = await db.select().from(chatActions).where(and(eq(chatActions.endpointId, endpoint.id), eq(chatActions.kind, "confirmation_response"), eq(sql<string>`${chatActions.payload}->>'decision'`, "accept")));
+    await db.update(companyMemberships).set({ membershipRole: "owner" }).where(and(eq(companyMemberships.companyId, fixture.companyId), eq(companyMemberships.principalId, "owner-user")));
+    const readRequest = async () => (await db.select().from(toolActionRequests).where(eq(toolActionRequests.id, request.id)))[0];
+    dropDeferred = deferred === "dropped by a stopping process";
+    const click = callbacks.onAction({ endpointId: endpoint.id, provider: "slack" as const, event: {
+      actionId: accept.providerActionId, adapter: {} as never, messageId: publication.providerMessageId!,
+      openModal: async () => undefined, raw: { type: "block_actions" }, thread: channel.thread,
+      threadId: `slack:C-OPS-SLOW:${publication.providerMessageId}`,
+      user: { userId: "UBOARD", userName: "reviewer", fullName: "Reviewer", isBot: false, isMe: false, isSystem: false }, value: interaction.id,
+    } });
+    const answered = await Promise.race([click.then(() => true), new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 1_500))]);
+    expect(answered).toBe(true);
+    expect(["approved", "executing"]).toContain((await readRequest()).status);
+    expect(execution.sends).toHaveLength(0);
+    expect((await issueThreadInteractionService(db).listForIssue(conversation.issueId)).find(row => row.id === interaction.id)?.status).toBe("accepted");
+    expect((await db.select().from(chatActions).where(eq(chatActions.id, accept.id)))[0].status).toBe("processed");
+    release();
+    if (dropDeferred) {
+      // The deferred call never started (the process stopped): the approval is durable and the recovery sweep runs it.
+      expect((await readRequest()).status).toBe("approved");
+      await execution.gateway.sweepActionReviews();
+    }
+    await vi.waitFor(async () => expect((await readRequest()).status).toBe("executed"), { timeout: 10_000 });
+    expect(execution.sends).toHaveLength(1);
+    expect(execution.sends[0].receipt).toMatchObject({ approved: true, actionRequestId: request.id });
+  });
+
   it("renders safe Telegram confirmations as opaque one-use buttons and wakes the resolved task", async () => {
     const fixture = await seedCompany();
     let injectSettlementCrash = true;
