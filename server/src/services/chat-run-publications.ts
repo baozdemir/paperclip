@@ -761,6 +761,21 @@ export async function enqueueChatRunMilestones(
         and continuation_wake.payload->>'issueId' = ${issueIdFromContext}
     )
   )`;
+  // A tool action review (an approved or rejected tool card) wakes the agent
+  // with its own durable key, not the interaction response key above, so its
+  // continuation showed no progress and a failure stayed silent. Candidate
+  // only: the origin resolver attests the whole review batch.
+  const hasToolActionContinuation = sql<boolean>`(
+    ${heartbeatRuns.contextSnapshot}->>'source' = 'tool_action_review' and exists (
+      select 1 from agent_wakeup_requests continuation_wake
+      where continuation_wake.company_id = ${heartbeatRuns.companyId}
+        and continuation_wake.run_id = ${heartbeatRuns.id}
+        and continuation_wake.agent_id = ${heartbeatRuns.agentId}
+        and continuation_wake.status <> 'skipped'
+        and continuation_wake.idempotency_key = 'tool-action-response:' || (${heartbeatRuns.contextSnapshot} -> 'toolActionRequestIds' ->> 0)
+        and continuation_wake.payload->>'issueId' = ${issueIdFromContext}
+    )
+  )`;
   let inserted = 0;
   let cursor: {
     updatedAt: Date;
@@ -849,6 +864,7 @@ export async function enqueueChatRunMilestones(
             hasQuestionContinuationTarget,
             hasMonitorContinuation,
             hasTaskContinuation,
+            hasToolActionContinuation,
           ),
           // Heartbeat marks a run succeeded before the presentation resolver
           // finishes. Waiting for its durable decision prevents a generic
