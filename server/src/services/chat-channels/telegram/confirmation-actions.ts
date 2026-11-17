@@ -6,6 +6,7 @@ import {
   and,
   asc,
   eq,
+  gte,
   inArray,
   ne,
   sql,
@@ -21,6 +22,8 @@ import {
   chatPublications,
   issueThreadInteractions,
   issues,
+  toolActionRequests,
+  toolInvocations,
 } from "@paperclipai/db";
 
 import {
@@ -39,6 +42,19 @@ import type { EndpointRecord } from "../runtime-types.js";
 import type { ActionEvent } from "chat";
 import { nativeSlackToolConfirmation, nativeTelegramConfirmation } from "../../chat-interaction-publications.js";
 import { HttpError } from "../../../errors.js";
+import { logger } from "../../../middleware/logger.js";
+// An approved tool call runs after the Slack click is answered: its card says so until the call settles.
+const TOOL_ACTION_RUNNING = "Accepted · running…";
+const TOOL_ACTION_SETTLED: Record<string, string> = {
+  executed: "Accepted", failed: "Accepted · failed", expired: "Accepted · not run", cancelled: "Accepted · not run",
+};
+// A call that timed out or was interrupted may have run on the provider: its card must not invite a second approval.
+const TOOL_ACTION_OUTCOME_UNKNOWN = ["tool_timeout", "tool_execution_outcome_unknown"];
+function toolActionCardLabel(status: string, errorCode: string | null): string | undefined {
+  if (status === "approved" || status === "executing") return TOOL_ACTION_RUNNING;
+  if (status === "failed" && errorCode && TOOL_ACTION_OUTCOME_UNKNOWN.includes(errorCode)) return "Accepted · outcome unknown";
+  return TOOL_ACTION_SETTLED[status];
+}
 /** Resolves a native Slack tool approval through the tool gateway (execution review). */
 export type ResolveToolAction = (input: {
   companyId: string; issueId: string; interactionId: string; actionRequestId: string;
@@ -514,8 +530,12 @@ export function createTelegramConfirmationActions(db: Db, options: TelegramConfi
       (interaction.continuationPolicy === "wake_assignee" ||
         (interaction.continuationPolicy === "wake_assignee_on_accept" &&
           interaction.status === "accepted"));
+    const toolActionRequestId = interaction.payload.toolAction?.actionRequestId;
+    const toolActionLabel = interaction.status === "accepted" && toolActionRequestId
+      ? (await readToolAction(toolActionRequestId))?.label
+      : undefined;
     const resolutionLabel =
-      interaction.status === "accepted" ? "Accepted" : "Rejected";
+      interaction.status !== "accepted" ? "Rejected" : toolActionLabel ?? "Accepted";
     const resolvedByThisProviderAction =
       action.result?.code === "confirmation_resolution_committed_by_provider";
     return db.transaction(async (tx) => {
@@ -660,6 +680,106 @@ export function createTelegramConfirmationActions(db: Db, options: TelegramConfi
     });
   }
 
+  async function readToolAction(actionRequestId: string) {
+    const [row] = await db
+      .select({
+        companyId: toolActionRequests.companyId,
+        interactionId: toolActionRequests.interactionId,
+        status: toolActionRequests.status,
+        errorCode: toolInvocations.errorCode,
+      })
+      .from(toolActionRequests)
+      .leftJoin(toolInvocations, eq(toolInvocations.id, toolActionRequests.invocationId))
+      .where(eq(toolActionRequests.id, actionRequestId));
+    return row && { ...row, label: toolActionCardLabel(row.status, row.errorCode) };
+  }
+
+  /** Replaces a tool approval card that says the approved call is running with the call's outcome. */
+  async function publishToolActionOutcome(actionRequestId: string): Promise<void> {
+    const request = await readToolAction(actionRequestId);
+    if (!request?.interactionId || !request.label || request.label === TOOL_ACTION_RUNNING) return;
+    // One resolution card per endpoint; exact keys use the unique (company, key) index.
+    const keys = (
+      await db.select({ id: chatEndpoints.id }).from(chatEndpoints).where(eq(chatEndpoints.companyId, request.companyId))
+    ).map((endpoint) => `interaction-resolution:${request.interactionId}:${endpoint.id}`);
+    if (keys.length === 0) return;
+    const cards = await db
+      .select()
+      .from(chatPublications)
+      .where(
+        and(
+          eq(chatPublications.companyId, request.companyId),
+          inArray(chatPublications.idempotencyKey, [...keys, ...keys.map((key) => `${key}:outcome`)]),
+        ),
+      );
+    const written = new Set(cards.map((card) => card.idempotencyKey));
+    const running = cards.filter(
+      (card) => card.payload.card?.body === TOOL_ACTION_RUNNING && !written.has(`${card.idempotencyKey}:outcome`),
+    );
+    if (running.length === 0) return;
+    const [interaction] = await db
+      .select({ id: issueThreadInteractions.id, payload: issueThreadInteractions.payload })
+      .from(issueThreadInteractions)
+      .where(eq(issueThreadInteractions.id, request.interactionId));
+    const prompt = interaction && "prompt" in interaction.payload ? interaction.payload.prompt : null;
+    if (!interaction || typeof prompt !== "string") return;
+    for (const publication of running) {
+      await db.transaction(async (tx) => {
+        await notifyChatPublicationWork(tx);
+        await tx
+          .insert(chatPublications)
+          .values({
+            companyId: publication.companyId,
+            endpointId: publication.endpointId,
+            conversationId: publication.conversationId,
+            issueId: publication.issueId,
+            idempotencyKey: `${publication.idempotencyKey}:outcome`,
+            payload: projectSafeChatPublication({
+              classification: "external",
+              source: "issue_interaction",
+              text: `${request.label}: ${prompt}`,
+              interaction: {
+                id: interaction.id,
+                card: { kind: "confirmation", title: prompt, body: request.label!, actions: [] },
+              },
+            }),
+            state: "pending",
+          })
+          .onConflictDoNothing();
+      });
+    }
+  }
+
+  // The outcome is written in memory after the call settles. Repair a card that a stopped process or a failed write
+  // left saying the call is running, or that was written after the call settled (recent settlements only).
+  async function repairToolActionCards(limit: number) {
+    const resolutionKey = sql`'interaction-resolution:' || ${toolActionRequests.interactionId} || ':' || ${chatEndpoints.id}`;
+    const stuck = await db
+      .selectDistinct({ id: toolActionRequests.id })
+      .from(toolActionRequests)
+      .innerJoin(chatEndpoints, eq(chatEndpoints.companyId, toolActionRequests.companyId))
+      .innerJoin(
+        chatPublications,
+        and(
+          eq(chatPublications.companyId, toolActionRequests.companyId),
+          eq(chatPublications.idempotencyKey, resolutionKey),
+        ),
+      )
+      .where(
+        and(
+          inArray(toolActionRequests.status, ["executed", "failed", "expired", "cancelled"]),
+          gte(toolActionRequests.resolvedAt, new Date(Date.now() - 24 * 60 * 60_000)),
+          eq(sql<string>`${chatPublications.payload}->'card'->>'body'`, TOOL_ACTION_RUNNING),
+          sql`not exists (select 1 from ${chatPublications} outcome where outcome.company_id = ${chatPublications.companyId} and outcome.idempotency_key = ${chatPublications.idempotencyKey} || ':outcome')`,
+        ),
+      )
+      .limit(limit);
+    for (const { id } of stuck) {
+      await publishToolActionOutcome(id).catch((err) =>
+        logger.warn({ err, actionRequestId: id }, "Tool approval card outcome not repaired"));
+    }
+  }
+
   async function reconcileTerminalConfirmationActions(
     limit = 100,
   ): Promise<number> {
@@ -678,7 +798,8 @@ export function createTelegramConfirmationActions(db: Db, options: TelegramConfi
     for (const candidate of candidates) {
       if (await settleTerminalConfirmationAction(candidate.id)) settled += 1;
     }
+    await repairToolActionCards(limit);
     return settled;
   }
-  return { settleTerminalConfirmationAction, reconcileTerminalConfirmationActions, handleTelegramConfirmation };
+  return { settleTerminalConfirmationAction, reconcileTerminalConfirmationActions, handleTelegramConfirmation, publishToolActionOutcome };
 }

@@ -44874,6 +44874,194 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
     expect(execution.sends[0].receipt).toMatchObject({ approved: true, actionRequestId: request.id });
   });
 
+  // A native Slack production approval card for a reviewed call that waits for `provider` before it reaches the server.
+  // `settle: false` leaves the gateway without its settlement hook (a process that stops right after the call settled).
+  async function slackToolApprovalCard(options: { provider: () => Promise<void>; dropDeferred?: () => boolean;
+    confirmationResolutionPersistBarrier?: () => Promise<void>; settle?: boolean }) {
+    const fixture = await seedCompany();
+    let execution: Awaited<ReturnType<typeof executionReviewFixture>>;
+    const { callbacks, endpoint, runtime, service } = await configuredSlackEndpoint(fixture, {
+      allowUnlinkedPeople: false, linkedBoardUser: true,
+      confirmationResolutionPersistBarrier: options.confirmationResolutionPersistBarrier,
+      scheduleDeferredWork: (run: () => void) => { if (!options.dropDeferred?.()) setImmediate(run); },
+      resolveToolAction: async input => {
+        const operation = input.decision === "approved" ? execution.gateway.approveActionRequest : execution.gateway.declineActionRequest;
+        return operation({ companyId: input.companyId, issueId: input.issueId, interactionId: input.interactionId, actionRequestId: input.actionRequestId,
+          actor: input.actor, beforeResolveInTransaction: input.beforeResolveInTransaction, deferExecution: input.deferExecution });
+      },
+    });
+    if (!callbacks.onAction) throw new Error("Slack action callback missing");
+    const channel = makeThread({ channelId: "C-OPS-CARD", id: "slack:C-OPS-CARD:8300.1", name: "ops-card" });
+    await deliverMessage({ callbacks, endpointId: endpoint.id, thread: channel.thread,
+      message: makeMessage({ id: "8300.1", text: "@maya run the production check", mentioned: true, userId: "UBOARD" }), trigger: "mention" });
+    await qualifySetupRoundTrip(service, endpoint.id, "UBOARD");
+    await service.test(endpoint.id, "owner-user");
+    const [conversation] = await service.listConversations(endpoint.id);
+    if (!conversation) throw new Error("Slack conversation missing");
+    const runId = randomUUID();
+    await db.insert(heartbeatRuns).values({ id: runId, companyId: fixture.companyId, agentId: fixture.assignedAgentId,
+      status: "running", invocationSource: "assignment", responsibleUserId: "owner-user",
+      contextSnapshot: { issueId: conversation.issueId, source: "chat:slack", endpointId: endpoint.id } });
+    await initializeRunIdentity(db, { companyId: fixture.companyId, runId, issueId: conversation.issueId, responsibleUserId: "owner-user", cause: "instruction" });
+    execution = await executionReviewFixture(db, { companyId: fixture.companyId, agentId: fixture.assignedAgentId, issueId: conversation.issueId, runId }, {
+      beforeSend: options.provider,
+      onToolActionSettled: options.settle === false ? undefined : (actionRequestId) => service.publishToolActionOutcome(actionRequestId),
+    });
+    await expect(execution.gateway.executeTool({ sessionToken: execution.session.token, tool: execution.prod.name, parameters: execution.parameters })).rejects.toMatchObject({ reasonCode: "approval_required" });
+    await service.processPendingPublications();
+    const [request] = await db.select().from(toolActionRequests).where(eq(toolActionRequests.companyId, fixture.companyId));
+    const interaction = (await issueThreadInteractionService(db).listForIssue(conversation.issueId)).find(row => row.payload.toolAction?.actionRequestId === request.id);
+    if (!interaction) throw new Error("Tool interaction missing");
+    const [publication] = await db.select().from(chatPublications).where(eq(chatPublications.idempotencyKey, `interaction:${interaction.id}:${endpoint.id}`));
+    const decisions = await db.select().from(chatActions).where(and(eq(chatActions.endpointId, endpoint.id), eq(chatActions.kind, "confirmation_response")));
+    const action = (decision: "accept" | "reject") => decisions.find(row => row.payload.decision === decision)!;
+    await db.update(companyMemberships).set({ membershipRole: "owner" }).where(and(eq(companyMemberships.companyId, fixture.companyId), eq(companyMemberships.principalId, "owner-user")));
+    return {
+      accept: action("accept"), conversation, execution, interaction, request, service,
+      cardEdits: () => (runtime.endpoints.get(endpoint.id)?.edits ?? []).filter(edit => edit.messageId === publication.providerMessageId).map(edit => edit.text),
+      posts: () => runtime.endpoints.get(endpoint.id)?.posts.length ?? 0,
+      status: async () => (await db.select().from(toolActionRequests).where(eq(toolActionRequests.id, request.id)))[0].status,
+      click: (decision: "accept" | "reject" = "accept") => callbacks.onAction!({ endpointId: endpoint.id, provider: "slack" as const, event: {
+        actionId: action(decision).providerActionId, adapter: {} as never, messageId: publication.providerMessageId!,
+        openModal: async () => undefined, raw: { type: "block_actions" }, thread: channel.thread,
+        threadId: `slack:C-OPS-CARD:${publication.providerMessageId}`,
+        user: { userId: "UBOARD", userName: "reviewer", fullName: "Reviewer", isBot: false, isMe: false, isSystem: false }, value: interaction.id,
+      } }),
+    };
+  }
+
+  // The approved call runs after the click is answered: the card says it is running until the call settles, then
+  // shows the outcome, so the approver does not watch an "Accepted" card that seems to do nothing. A call that timed
+  // out or was interrupted may have run on the server: its card must not say it failed (a second approval could run
+  // a production change twice).
+  it.each([
+    { name: "executed", status: "executed", label: "Accepted" },
+    { name: "failed", status: "failed", label: "Accepted · failed" },
+    { name: "timed out", status: "failed", label: "Accepted · outcome unknown" },
+    { name: "interrupted", status: "failed", label: "Accepted · outcome unknown" },
+    { name: "expired", status: "expired", label: "Accepted · not run" },
+  ])("shows a native Slack tool approval as running until the approved call is $name", async ({ name, status, label }) => {
+    let release!: () => void;
+    const slowProvider = new Promise<void>((resolve) => { release = resolve; });
+    onTestFinished(() => release());
+    let dropDeferred = false;
+    const card = await slackToolApprovalCard({ dropDeferred: () => dropDeferred, provider: async () => {
+      await slowProvider;
+      if (name === "failed") throw new Error("provider unavailable");
+      if (name === "timed out") throw Object.assign(new Error("The operation was aborted"), { name: "AbortError" });
+    } });
+    // "expired": the process stops before the call starts and the task is closed before the recovery sweep runs it.
+    // "interrupted": the process claimed the call and stopped during it (no call is left in flight here).
+    dropDeferred = name === "expired" || name === "interrupted";
+    await card.click();
+    await card.service.processPendingPublications();
+    await vi.waitFor(() => expect(card.cardEdits()).toHaveLength(1));
+    expect(card.cardEdits()[0]).toContain("Accepted · running…");
+    expect(card.execution.sends).toHaveLength(0);
+    const posts = card.posts();
+    if (name === "expired") {
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, card.conversation.issueId));
+      await card.execution.gateway.sweepActionReviews();
+    }
+    if (name === "interrupted") {
+      // Ten minutes after the claim the recovery sweep cannot know whether the call ran.
+      await db.update(toolActionRequests).set({ status: "executing", updatedAt: new Date(Date.now() - 11 * 60_000) }).where(eq(toolActionRequests.id, card.request.id));
+      await card.execution.gateway.sweepActionReviews();
+    }
+    release();
+    await vi.waitFor(async () => expect(await card.status()).toBe(status), { timeout: 10_000 });
+    await vi.waitFor(async () => {
+      await card.service.processPendingPublications();
+      expect(card.cardEdits()).toHaveLength(2);
+    }, { timeout: 10_000 });
+    expect(card.cardEdits()[1]).toContain(label);
+    expect(card.cardEdits()[1]).not.toContain("running");
+    if (label === "Accepted") expect(card.cardEdits()[1]).not.toContain("Accepted ·");
+    // The outcome edits the card; it never posts a new message.
+    expect(card.posts()).toBe(posts);
+    // A repeated settlement (the recovery sweep, a second click) does not edit the card again.
+    await card.service.publishToolActionOutcome(card.request.id);
+    await card.service.processPendingPublications();
+    expect(card.cardEdits()).toHaveLength(2);
+  });
+
+  it("keeps a rejected native Slack tool approval card as Rejected", async () => {
+    const card = await slackToolApprovalCard({ provider: async () => undefined });
+    await card.click("reject");
+    await card.service.processPendingPublications();
+    await vi.waitFor(() => expect(card.cardEdits()).toHaveLength(1));
+    expect(card.cardEdits()[0]).toContain("Rejected");
+    expect(card.cardEdits()[0]).not.toMatch(/Accepted|running/);
+    expect(await card.status()).toBe("rejected");
+    await card.service.publishToolActionOutcome(card.request.id);
+    await card.service.processPendingPublications();
+    expect(card.cardEdits()).toHaveLength(1);
+    expect(card.execution.sends).toHaveLength(0);
+  });
+
+  it("shows the outcome of an approved call that settles while its running card is written", async () => {
+    let release!: () => void;
+    const slowProvider = new Promise<void>((resolve) => { release = resolve; });
+    onTestFinished(() => release());
+    let unlock!: () => void;
+    const unlocked = new Promise<void>((resolve) => { unlock = resolve; });
+    onTestFinished(() => unlock());
+    let lockedAction: string | undefined;
+    let lockHeld: Promise<void> | undefined;
+    // After the decision commits, hold the confirmation row so the card is written only after the call settled.
+    const card = await slackToolApprovalCard({ provider: () => slowProvider, confirmationResolutionPersistBarrier: async () => {
+      if (!lockedAction) return;
+      await new Promise<void>((held) => {
+        lockHeld = db.transaction(async (tx) => {
+          await tx.select({ id: chatActions.id }).from(chatActions).where(eq(chatActions.id, lockedAction!)).for("update");
+          held();
+          await unlocked;
+        });
+      });
+    } });
+    lockedAction = card.accept.id;
+    const click = card.click();
+    await vi.waitFor(async () => {
+      const [waiting] = await db.execute<{ n: number }>(sql`select count(*)::int as n from pg_stat_activity where wait_event_type = 'Lock'`);
+      expect(waiting?.n).toBeGreaterThan(0);
+    }, { timeout: 10_000 });
+    release();
+    await vi.waitFor(async () => expect(await card.status()).toBe("executed"), { timeout: 10_000 });
+    // The call's own settlement found no card to replace yet.
+    expect(await db.select().from(chatPublications).where(like(chatPublications.idempotencyKey, `interaction-resolution:${card.interaction.id}:%`))).toHaveLength(0);
+    unlock();
+    await lockHeld;
+    await click;
+    await vi.waitFor(async () => {
+      await card.service.processPendingPublications();
+      expect(card.cardEdits()).toHaveLength(2);
+    }, { timeout: 10_000 });
+    expect(card.cardEdits()[0]).toContain("Accepted · running…");
+    expect(card.cardEdits()[1]).toContain("Accepted");
+    expect(card.cardEdits()[1]).not.toMatch(/running|Accepted ·/);
+  });
+
+  // The outcome is written by an in-memory hook after the call's status commits: a process that stops in between, or a
+  // failed write, must not leave the card on "running…" for good. Publication maintenance repairs it.
+  it("repairs a card left running when the approved call settled without updating it", async () => {
+    let release!: () => void;
+    const slowProvider = new Promise<void>((resolve) => { release = resolve; });
+    onTestFinished(() => release());
+    const card = await slackToolApprovalCard({ provider: () => slowProvider, settle: false });
+    await card.click();
+    await card.service.processPendingPublications();
+    await vi.waitFor(() => expect(card.cardEdits()).toHaveLength(1));
+    release();
+    await vi.waitFor(async () => expect(await card.status()).toBe("executed"), { timeout: 10_000 });
+    expect(card.cardEdits()).toHaveLength(1);
+    await vi.waitFor(async () => {
+      await card.service.processPendingPublications();
+      expect(card.cardEdits()).toHaveLength(2);
+    }, { timeout: 10_000 });
+    expect(card.cardEdits()[1]).toContain("Accepted");
+    expect(card.cardEdits()[1]).not.toMatch(/running|Accepted ·/);
+  });
+
   it("renders safe Telegram confirmations as opaque one-use buttons and wakes the resolved task", async () => {
     const fixture = await seedCompany();
     let injectSettlementCrash = true;

@@ -936,7 +936,12 @@ export async function createApp(
   const toolActionDeliveries = toolActionDeliveryService(db, heartbeatService(db, { pluginWorkerManager: workerManager }));
   const toolGateway = createToolGatewayService(db, {
     budgetHooks: { cancelWorkForScope: heartbeatService(db, { pluginWorkerManager: workerManager }).cancelBudgetScopeWork },
-    onToolActionSettled: (id) => toolActionDeliveries.deliver(id),
+    onToolActionSettled: async (id) => {
+      // The Slack approval card shows the approved call's outcome first; a failed card update never holds the continuation.
+      await chatChannels.publishToolActionOutcome(id).catch((err) =>
+        logger.warn({ err, actionRequestId: id }, "Tool approval card outcome not published"));
+      return toolActionDeliveries.deliver(id);
+    },
     pluginToolDispatcher: toolDispatcher,
     deploymentMode: opts.deploymentMode,
     deploymentExposure: opts.deploymentExposure,
