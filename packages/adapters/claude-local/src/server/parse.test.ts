@@ -134,6 +134,56 @@ describe("detectClaudeLoginRequired", () => {
     expect(isClaudeTransientUpstreamError(input)).toBe(true);
   });
 
+  it("does not take a tool's output or the model's text for a login prompt once a result was parsed", () => {
+    // A QA run's tools see "401 Unauthorized" and pages that say "login required"; the run itself failed on an overload.
+    const input = {
+      parsed: { is_error: true, subtype: "error_during_execution", result: "API Error: 529 overloaded" },
+      stdout: [
+        '{"type":"user","message":{"content":[{"type":"tool_result","content":"HTTP/1.1 401 Unauthorized"}]}}',
+        '{"type":"assistant","message":{"content":[{"type":"text","text":"The admin page says login required."}]}}',
+      ].join("\n"),
+      stderr: "",
+    };
+    expect(detectClaudeLoginRequired(input).requiresLogin).toBe(false);
+    expect(isClaudeTransientUpstreamError(input)).toBe(true);
+  });
+
+  it("does not take a cut-off first line of a capped capture for a login prompt once a result was parsed", () => {
+    // Paperclip keeps the last 4 MiB of stdout: a long QA run's capture starts inside a tool result about a 401 page.
+    const input = {
+      parsed: { is_error: true, subtype: "success", result: "You've hit your 5-hour limit · resets 11:20am (UTC)" },
+      stdout: [
+        'HTTP/1.1 401 Unauthorized</title></head><body>Please log in</body>"}]}}',
+        '{"type":"result","subtype":"success","is_error":true,"result":"You\'ve hit your 5-hour limit · resets 11:20am (UTC)",' +
+          '"permission_denials":[{"tool_name":"Bash","tool_input":{"command":"curl /admin # 401 Unauthorized"}}]}',
+      ].join("\n"),
+      stderr: "",
+    };
+    expect(detectClaudeLoginRequired(input).requiresLogin).toBe(false);
+  });
+
+  it("takes the CLI's own login failure from the result once a result was parsed", () => {
+    // Claude CLI writes a login failure as an assistant API-error event and again as the result text.
+    const result = "Not logged in · Please run /login";
+    expect(
+      detectClaudeLoginRequired({
+        parsed: { is_error: true, subtype: "success", api_error_status: 401, result },
+        stdout: JSON.stringify({ type: "assistant", error: "authentication_failed", message: { content: [{ type: "text", text: result }] } }),
+        stderr: "",
+      }).requiresLogin,
+    ).toBe(true);
+  });
+
+  it("still reads every stdout line for a login prompt when no result was parsed", () => {
+    expect(
+      detectClaudeLoginRequired({
+        parsed: null,
+        stdout: '{"type":"assistant","message":{"content":[{"type":"text","text":"Please run /login"}]}}',
+        stderr: "",
+      }).requiresLogin,
+    ).toBe(true);
+  });
+
   it("does not treat a bare token phrase in raw stdout with no parsed result as login required", () => {
     // Untrusted stdout alone must not satisfy a token-failure marker. Only the
     // parsed terminal result fields of a failed run can trip the token markers.

@@ -93,6 +93,41 @@ describe("claude_local failure classification precedence", () => {
     expect(result.errorCode).toBe("max_turns_exhausted");
   });
 
+  // A QA run's tools print "401 Unauthorized"; that is the agent's own output, not Claude asking for a login.
+  it("does not report claude_auth_required for the 5-hour limit when a tool printed Unauthorized", async () => {
+    mockExecutionResult(
+      buildProcResult(
+        { is_error: true, subtype: "success", result: "You've hit your 5-hour limit · resets 11:20am (UTC)" },
+        "GET /api/admin -> HTTP/1.1 401 Unauthorized (login required)",
+      ),
+    );
+
+    const result = await execute(buildContext() as never);
+
+    // Only the wrong login label goes; how the limit itself is recognised is unchanged.
+    expect(result.errorCode).toBeNull();
+    expect(result.errorMessage).toContain("You've hit your 5-hour limit");
+  });
+
+  it("reports claude_transient_upstream for an overload when a tool printed Unauthorized", async () => {
+    mockExecutionResult(
+      buildProcResult({ is_error: true, subtype: "error_during_execution", result: "API Error: 529 overloaded" },
+        "GET /api/admin -> HTTP/1.1 401 Unauthorized"),
+    );
+
+    const result = await execute(buildContext() as never);
+
+    expect(result.errorCode).toBe("claude_transient_upstream");
+  });
+
+  it("still reports claude_auth_required when Claude asks for a login", async () => {
+    mockExecutionResult(buildProcResult({ is_error: true, subtype: "error", result: "Not logged in · Please run /login" }));
+
+    const result = await execute(buildContext() as never);
+
+    expect(result.errorCode).toBe("claude_auth_required");
+  });
+
   it("still reports model_not_found when the provider returns it", async () => {
     mockExecutionResult(
       buildProcResult({ is_error: true, subtype: "error", result: "API Error: 404 model not found" }),

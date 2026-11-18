@@ -247,10 +247,12 @@ export function detectClaudeLoginRequired(input: {
   const parsed = input.parsed ?? null;
   const resultText = asString(parsed?.result, "").trim();
 
-  // The legacy login-prompt markers keep their broad scope. They match against
-  // every output line, which includes the parsed result, the parsed errors, and
-  // the raw stdout and stderr.
-  const promptLines = [resultText, ...extractClaudeErrorMessages(parsed ?? {}), input.stdout, input.stderr]
+  // The legacy login-prompt markers match the parsed result, the parsed errors
+  // and stderr, and the raw stdout only when no result was parsed. Once there
+  // is one, stdout is the agent's own stream (tool results such as a QA run's
+  // "401 Unauthorized", model text, a capped capture's cut-off first line), and
+  // the CLI writes its login failure into the result.
+  const promptLines = [resultText, ...extractClaudeErrorMessages(parsed ?? {}), parsed === null ? input.stdout : "", input.stderr]
     .join("\n")
     .split(/\r?\n/)
     .map((line) => line.trim())
